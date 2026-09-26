@@ -1,0 +1,29 @@
+pub(crate) const WORLD_WIDTH: f32 = 512.0;
+pub(crate) const WORLD_HEIGHT: f32 = 256.0;
+
+pub(crate) const PIXEL_WIDTH: u32 = WORLD_WIDTH as u32;
+pub(crate) const PIXEL_HEIGHT: u32 = WORLD_HEIGHT as u32;
+
+pub(crate) const PARTICLE_COUNT: u32 = 1_500;
+pub(crate) const MAX_PARTICLES: u32 = 70_000;
+pub(crate) const MAX_SPAWNS_PER_FRAME: u32 = 1024;
+pub(crate) const BRUSH_RADIUS_LIMIT: f32 = 24.0;
+pub(crate) const RADIUS_LIMIT: f32 = 1.6;
+pub(crate) const RADIUS_FLOOR: f32 = 0.7;
+pub(crate) const INTERACTION_RANGE: f32 = 2.0 * RADIUS_LIMIT;
+pub(crate) const CELL_SIZE: f32 = INTERACTION_RANGE;
+pub(crate) const SWEEP_RADIUS: i32 = 1;
+pub(crate) const HASH_MARGIN: f32 = 2.0 * INTERACTION_RANGE;
+pub(crate) const WALL_LAYERS: u32 = 2;
+pub(crate) const SMOOTHING_RADIUS: f32 = INTERACTION_RANGE;
+pub(crate) const SHELTER_REACH: f32 = 1.5;
+pub(crate) const AMBIENT_TEMPERATURE: f32 = 20.0;
+pub(crate) const MIN_TEMPERATURE: f32 = -273.0;
+pub(crate) const MAX_TEMPERATURE: f32 = 1200.0;
+pub(crate) const TEMPERATURE_REFERENCE: f32 = 100.0;
+pub(crate) const MAX_CONTACTS: u32 = 8;
+pub(crate) const SUBSTEP: f32 = 1.0 / 500.0;
+pub(crate) const MAX_FREQ_N: f32 = 0.170 / SUBSTEP;
+pub(crate) const MAX_FREQ_T: f32 = 0.100 / SUBSTEP;
+pub(crate) const MAX_FRAME_TIME: f32 = 1.0 / 30.0;
+pub(crate) const MAX_SUBSTEPS: u32 = (MAX_FRAME_TIME / SUBSTEP) as u32 + 1;

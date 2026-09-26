@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Particles</title>
+
+    <link data-trunk rel="rust" data-target-name="particles" data-wasm-opt="z" />
+
+    <style>
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+            background: #0a080c;
+        }
+
+        canvas {
+            display: block;
+            width: 100vw !important;
+            height: 100vh !important;
+            touch-action: none;
+        }
+
+        #startup-error {
+            color: #ddd;
+            font: 14px/1.5 ui-monospace, monospace;
+            white-space: pre-wrap;
+        }
+    </style>
+    <script>
+        const WINIT_SENTINEL = 'Using exceptions for control flow';
+
+        function reportStartupFailure(detail) {
+            if (String(detail).includes(WINIT_SENTINEL)) return;
+            if (document.getElementById('startup-error')) return;
+            const pre = document.createElement('pre');
+            pre.id = 'startup-error';
+            pre.textContent = `Failed to start: ${detail}\n\n`
+                + (navigator.gpu
+                    ? 'WebGPU is available, so this is not a browser-support problem.'
+                    : 'This browser exposes no navigator.gpu. The engine requires '
+                      + 'WebGPU; WebGL2 cannot run its compute shaders.');
+            document.body.appendChild(pre);
+        }
+        addEventListener('unhandledrejection', (e) => reportStartupFailure(e.reason));
+        addEventListener('error', (e) => reportStartupFailure(e.message));
+    </script>
+</head>
+
+<body id="wasm-example">
+</body>
+
+</html>
