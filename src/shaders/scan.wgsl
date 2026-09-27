@@ -1,24 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 struct ScanParams {
     world: vec2<f32>,
     grid: vec2<u32>,
@@ -28,21 +7,11 @@ struct ScanParams {
 @group(0) @binding(2) var<storage, read_write> cell_start: array<vec4<u32>>;
 @group(0) @binding(3) var<storage, read_write> cell_cursor: array<vec4<u32>>;
 @group(0) @binding(5) var<uniform> params: ScanParams;
-
-
-
 const SCAN_WORKGROUP: u32 = 256u;
-
-
-
 const SCAN_GROUP: u32 = 16u;
 
 var<workgroup> partials: array<u32, SCAN_WORKGROUP>;
 var<workgroup> group_totals: array<u32, SCAN_GROUP>;
-
-
-
-
 
 @compute @workgroup_size(256)
 fn scan_cells(@builtin(local_invocation_id) local_id: vec3<u32>) {
@@ -73,8 +42,6 @@ fn scan_cells(@builtin(local_invocation_id) local_id: vec3<u32>) {
     }
     workgroupBarrier();
 
-
-
     var running = 0u;
     for (var g = 0u; g < group; g++) {
         running += group_totals[g];
@@ -82,9 +49,6 @@ fn scan_cells(@builtin(local_invocation_id) local_id: vec3<u32>) {
     for (var k = group * SCAN_GROUP; k < t; k++) {
         running += partials[k];
     }
-
-
-
 
     for (var i = 0u; i < per_thread; i++) {
         let v = first + i;
@@ -102,14 +66,6 @@ fn scan_cells(@builtin(local_invocation_id) local_id: vec3<u32>) {
         }
     }
     if t == SCAN_WORKGROUP - 1u {
-
-
-
-
-
-
-
-
         cell_start[vec4_count] = vec4<u32>(running);
     }
 }

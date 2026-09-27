@@ -309,7 +309,7 @@ impl<'a> Controller<'a> {
             }
             _ => {}
         }
-        return false;
+        false
     }
 
     fn ui_scale(&self) -> f32 {

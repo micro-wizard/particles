@@ -10,10 +10,16 @@ pub struct Particle {
     pub drawn: [f32; 2],
     pub packing: f32,
     pub temperature: f32,
+    pub parent: u32,
+    pub grandparent: u32,
+    pub sprout: u32,
+    pub rest_angle: f32,
+    pub stem_force: [f32; 2],
 }
 
 pub const SIZE_SPREAD: f32 = 0.1;
 pub const DEAD: u32 = u32::MAX;
+pub const NO_PARENT: u32 = u32::MAX;
 
 unsafe impl bytemuck::Zeroable for Particle {}
 unsafe impl bytemuck::Pod for Particle {}
@@ -30,6 +36,7 @@ impl Particle {
             temperature: materials::MATERIALS[material as usize]
                 .params
                 .default_temperature,
+            ..Self::dead()
         }
     }
 
@@ -42,13 +49,17 @@ impl Particle {
             drawn: [0.0, 0.0],
             packing: 0.0,
             temperature: config::AMBIENT_TEMPERATURE,
+            parent: NO_PARENT,
+            grandparent: NO_PARENT,
+            sprout: 0,
+            rest_angle: 0.0,
+            stem_force: [0.0, 0.0],
         }
     }
 }
 
-pub fn seed_world(grains: u32) -> Vec<Particle> {
-    let particles = seed_walls();
-    particles
+pub fn seed_world(_grains: u32) -> Vec<Particle> {
+    seed_walls()
 }
 
 pub fn seed_walls() -> Vec<Particle> {
@@ -117,6 +128,8 @@ pub fn seed_full_screen(material: u32) -> Vec<Particle> {
     particles
 }
 
+// not actually dead, used in test
+#[allow(dead_code)]
 pub fn seed_block(count: u32) -> Vec<Particle> {
     let defaults = materials::MaterialParams::defaults();
     let widest = defaults
@@ -217,6 +230,16 @@ pub(crate) fn random_range(min: f32, max: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn particle_matches_the_wgsl_layout() {
+        assert_eq!(std::mem::size_of::<Particle>(), 64);
+        assert_eq!(std::mem::offset_of!(Particle, temperature), 36);
+        assert_eq!(std::mem::offset_of!(Particle, parent), 40);
+        assert_eq!(std::mem::offset_of!(Particle, sprout), 48);
+        assert_eq!(std::mem::offset_of!(Particle, rest_angle), 52);
+        assert_eq!(std::mem::offset_of!(Particle, stem_force), 56);
+    }
 
     #[test]
     fn seeds_every_material_that_can_be_seeded() {

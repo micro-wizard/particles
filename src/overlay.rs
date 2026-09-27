@@ -1,7 +1,7 @@
 use crate::{
     config,
     gpu_timing::Span,
-    materials::{Globals, MaterialParams, MATERIALS, MATERIAL_COUNT},
+    materials::{Globals, MaterialParams, MATERIALS, MATERIAL_COUNT, NO_TRANSITION},
     pixel_font,
 };
 use std::collections::VecDeque;
@@ -685,7 +685,11 @@ impl Piece {
 
 fn menu_rows(width: i32) -> Vec<Vec<Piece>> {
     let pieces = std::iter::once(Piece::Tools)
-        .chain((0..MATERIALS.len()).map(Piece::Swatch))
+        .chain(
+            (0..MATERIALS.len())
+                .filter(|&id| MATERIALS[id].palette)
+                .map(Piece::Swatch),
+        )
         .chain(std::iter::once(Piece::Controls));
     let mut rows: Vec<Vec<Piece>> = Vec::new();
     for piece in pieces {
@@ -870,6 +874,11 @@ fn swatch(
     }
     if material.is_static() {
         response = response.on_hover_text("Never moves: painting it lays down terrain.");
+    }
+    if material.params.sprouts != NO_TRANSITION {
+        response = response.on_hover_text(
+            "Sprouts once it lands and grows into a swaying plant that burns.",
+        );
     }
     if response.clicked() {
         brush.material = id;

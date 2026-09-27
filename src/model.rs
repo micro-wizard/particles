@@ -3,7 +3,7 @@ use crate::{
     config, ecs,
     gpu_context::GpuContext,
     gpu_timing::Span,
-    materials::{Globals, MaterialParams, MATERIAL_COUNT},
+    materials::{Globals, MaterialParams, MATERIAL_COUNT, NO_TRANSITION},
 };
 
 pub struct Model {
@@ -108,7 +108,11 @@ impl Model {
             material,
 
             temperature: params.default_temperature,
-            _padding: 0.0,
+            budget: if params.sprouts == NO_TRANSITION {
+                0
+            } else {
+                (config::SHOOT_LENGTH as f32 * ecs::random_range(0.6, 1.0)) as u32
+            },
         });
     }
 }

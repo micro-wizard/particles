@@ -455,7 +455,7 @@ impl<'a> View<'a> {
     }
 
     pub fn window(&self) -> &Window {
-        &self.window
+        self.window
     }
 
     pub fn resize(

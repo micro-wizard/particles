@@ -24,6 +24,10 @@ pub struct MaterialParams {
     pub becomes_above: u32,
     pub below_point: f32,
     pub becomes_below: u32,
+    pub bond_freq: f32,
+    pub heat_release: f32,
+    pub growth_period: f32,
+    pub sprouts: u32,
 }
 
 pub const NO_TRANSITION: u32 = u32::MAX;
@@ -34,6 +38,9 @@ unsafe impl bytemuck::Pod for MaterialParams {}
 #[derive(Copy, Clone, Debug)]
 pub struct Material {
     pub name: &'static str,
+    /// Whether the brush menu offers it; growth and burning products are left
+    /// to arise on their own.
+    pub palette: bool,
     pub params: MaterialParams,
 }
 
@@ -44,10 +51,14 @@ pub const ICE: u32 = 5;
 pub const STEAM: u32 = 6;
 pub const LAVA: u32 = 7;
 pub const OBSIDIAN: u32 = 8;
+pub const PLANT: u32 = 10;
+pub const EMBER: u32 = 11;
+pub const ASH: u32 = 12;
 
-pub const MATERIALS: [Material; 9] = [
+pub const MATERIALS: [Material; 13] = [
     Material {
         name: "Sand",
+        palette: true,
         params: MaterialParams {
             colour: [0.722, 0.561, 0.322, 1.0],
             freq_n: 80.0,
@@ -70,10 +81,15 @@ pub const MATERIALS: [Material; 9] = [
             becomes_above: NO_TRANSITION,
             below_point: 0.0,
             becomes_below: NO_TRANSITION,
+            bond_freq: 0.0,
+            heat_release: 0.0,
+            growth_period: 0.0,
+            sprouts: NO_TRANSITION,
         },
     },
     Material {
         name: "Gravel",
+        palette: true,
         params: MaterialParams {
             colour: [0.470, 0.470, 0.500, 1.0],
             freq_n: 53.0,
@@ -96,10 +112,15 @@ pub const MATERIALS: [Material; 9] = [
             becomes_above: LAVA,
             below_point: 0.0,
             becomes_below: NO_TRANSITION,
+            bond_freq: 0.0,
+            heat_release: 0.0,
+            growth_period: 0.0,
+            sprouts: NO_TRANSITION,
         },
     },
     Material {
         name: "Powder",
+        palette: true,
         params: MaterialParams {
             colour: [0.780, 0.760, 0.700, 1.0],
             freq_n: 77.0,
@@ -122,10 +143,15 @@ pub const MATERIALS: [Material; 9] = [
             becomes_above: NO_TRANSITION,
             below_point: 0.0,
             becomes_below: NO_TRANSITION,
+            bond_freq: 0.0,
+            heat_release: 0.0,
+            growth_period: 0.0,
+            sprouts: NO_TRANSITION,
         },
     },
     Material {
         name: "Water",
+        palette: true,
         params: MaterialParams {
             colour: [0.157, 0.435, 0.776, 1.0],
             freq_n: 77.0,
@@ -148,10 +174,15 @@ pub const MATERIALS: [Material; 9] = [
             becomes_above: STEAM,
             below_point: 0.0,
             becomes_below: ICE,
+            bond_freq: 0.0,
+            heat_release: 0.0,
+            growth_period: 0.0,
+            sprouts: NO_TRANSITION,
         },
     },
     Material {
         name: "Wall",
+        palette: true,
         params: MaterialParams {
             colour: [0.180, 0.180, 0.220, 1.0],
             freq_n: 80.0,
@@ -174,10 +205,15 @@ pub const MATERIALS: [Material; 9] = [
             becomes_above: NO_TRANSITION,
             below_point: 0.0,
             becomes_below: NO_TRANSITION,
+            bond_freq: 0.0,
+            heat_release: 0.0,
+            growth_period: 0.0,
+            sprouts: NO_TRANSITION,
         },
     },
     Material {
         name: "Ice",
+        palette: true,
         params: MaterialParams {
             colour: [0.750, 0.850, 0.950, 1.0],
             freq_n: 80.0,
@@ -200,10 +236,15 @@ pub const MATERIALS: [Material; 9] = [
             becomes_above: WATER,
             below_point: 0.0,
             becomes_below: NO_TRANSITION,
+            bond_freq: 0.0,
+            heat_release: 0.0,
+            growth_period: 0.0,
+            sprouts: NO_TRANSITION,
         },
     },
     Material {
         name: "Steam",
+        palette: true,
         params: MaterialParams {
             colour: [0.850, 0.870, 0.900, 1.0],
             freq_n: 77.0,
@@ -228,10 +269,15 @@ pub const MATERIALS: [Material; 9] = [
 
             below_point: 99.0,
             becomes_below: WATER,
+            bond_freq: 0.0,
+            heat_release: 0.0,
+            growth_period: 0.0,
+            sprouts: NO_TRANSITION,
         },
     },
     Material {
         name: "Lava",
+        palette: true,
 
         params: MaterialParams {
             colour: [0.950, 0.350, 0.080, 1.0],
@@ -262,10 +308,15 @@ pub const MATERIALS: [Material; 9] = [
 
             below_point: 700.0,
             becomes_below: OBSIDIAN,
+            bond_freq: 0.0,
+            heat_release: 0.0,
+            growth_period: 0.0,
+            sprouts: NO_TRANSITION,
         },
     },
     Material {
         name: "Obsidian",
+        palette: true,
 
         params: MaterialParams {
             colour: [0.260, 0.220, 0.340, 1.0],
@@ -294,6 +345,134 @@ pub const MATERIALS: [Material; 9] = [
             becomes_above: LAVA,
             below_point: 0.0,
             becomes_below: NO_TRANSITION,
+            bond_freq: 0.0,
+            heat_release: 0.0,
+            growth_period: 0.0,
+            sprouts: NO_TRANSITION,
+        },
+    },
+    Material {
+        name: "Seed",
+        palette: true,
+        params: MaterialParams {
+            colour: [0.470, 0.330, 0.170, 1.0],
+            freq_n: 80.0,
+            freq_t: 25.0,
+            zeta_n: 0.30,
+            zeta_t: 0.63,
+            mu: 0.8,
+            density: 3.0,
+            radius: 1.0,
+            rest_packing: 0.0,
+            pressure_k: 0.0,
+            viscosity: 0.0,
+            is_static: 0.0,
+            spacing: 2.2,
+            conductivity: 60.0,
+            heat_capacity: 1.5,
+            default_temperature: config::AMBIENT_TEMPERATURE,
+            thermal_expansion: 0.0,
+            above_point: 250.0,
+            becomes_above: EMBER,
+            below_point: 0.0,
+            becomes_below: NO_TRANSITION,
+            bond_freq: 60.0,
+            heat_release: 0.0,
+            growth_period: 0.2,
+            sprouts: PLANT,
+        },
+    },
+    Material {
+        name: "Plant",
+        palette: false,
+        params: MaterialParams {
+            colour: [0.300, 0.620, 0.250, 1.0],
+            freq_n: 60.0,
+            freq_t: 20.0,
+            zeta_n: 0.30,
+            zeta_t: 0.80,
+            mu: 0.4,
+            density: 0.65,
+            radius: 0.7,
+            rest_packing: 0.0,
+            pressure_k: 0.0,
+            viscosity: 0.0,
+            is_static: 0.0,
+            spacing: 2.2,
+            conductivity: 150.0,
+            heat_capacity: 1.5,
+            default_temperature: config::AMBIENT_TEMPERATURE,
+            thermal_expansion: 0.0,
+            above_point: 250.0,
+            becomes_above: EMBER,
+            below_point: 0.0,
+            becomes_below: NO_TRANSITION,
+            bond_freq: 60.0,
+            heat_release: 0.0,
+            growth_period: 0.2,
+            sprouts: PLANT,
+        },
+    },
+    Material {
+        name: "Ember",
+        palette: false,
+        params: MaterialParams {
+            colour: [1.000, 0.550, 0.120, 1.0],
+            freq_n: 60.0,
+            freq_t: 20.0,
+            zeta_n: 0.30,
+            zeta_t: 0.80,
+            mu: 0.4,
+            density: 0.65,
+            radius: 0.7,
+            rest_packing: 0.0,
+            pressure_k: 0.0,
+            viscosity: 0.0,
+            is_static: 0.0,
+            spacing: 2.2,
+            conductivity: 150.0,
+            heat_capacity: 1.5,
+            default_temperature: 400.0,
+            thermal_expansion: 0.0,
+            above_point: 700.0,
+            becomes_above: ASH,
+            below_point: 150.0,
+            becomes_below: PLANT,
+            bond_freq: 60.0,
+            heat_release: 450.0,
+            growth_period: 0.0,
+            sprouts: NO_TRANSITION,
+        },
+    },
+    Material {
+        name: "Ash",
+        palette: false,
+        params: MaterialParams {
+            colour: [0.360, 0.350, 0.340, 1.0],
+            freq_n: 77.0,
+            freq_t: 24.5,
+            zeta_n: 0.97,
+            zeta_t: 0.92,
+            mu: 0.3,
+            density: 0.4,
+            radius: 0.7,
+            rest_packing: 0.0,
+            pressure_k: 0.0,
+            viscosity: 0.0,
+            is_static: 0.0,
+            spacing: 2.2,
+            conductivity: 60.0,
+            heat_capacity: 1.0,
+            default_temperature: config::AMBIENT_TEMPERATURE,
+            thermal_expansion: 0.0,
+            above_point: 0.0,
+            becomes_above: NO_TRANSITION,
+            below_point: 0.0,
+            becomes_below: NO_TRANSITION,
+            bond_freq: 0.0,
+            heat_release: 0.0,
+            growth_period: 0.0,
+            sprouts: NO_TRANSITION,
         },
     },
 ];
@@ -307,6 +486,8 @@ impl Material {
         self.params.pressure_k > 0.0
     }
 
+    // not actually dead, just used in test
+    #[allow(dead_code)]
     pub fn is_gas(&self) -> bool {
         self.params.thermal_expansion > 0.0
     }
@@ -526,12 +707,15 @@ mod tests {
     fn contact_springs_stay_inside_the_substep() {
         for m in MATERIALS.iter() {
             assert!(
-                m.params.freq_n <= config::MAX_FREQ_N && m.params.freq_t <= config::MAX_FREQ_T,
-                "{}: springs at {} Hz normal and {} Hz tangential, but SUBSTEP {} only \
-                 holds {} and {}",
+                m.params.freq_n <= config::MAX_FREQ_N
+                    && m.params.freq_t <= config::MAX_FREQ_T
+                    && m.params.bond_freq <= config::MAX_FREQ_N,
+                "{}: springs at {} Hz normal, {} Hz tangential and {} Hz bonded, but \
+                 SUBSTEP {} only holds {} and {}",
                 m.name,
                 m.params.freq_n,
                 m.params.freq_t,
+                m.params.bond_freq,
                 config::SUBSTEP,
                 config::MAX_FREQ_N,
                 config::MAX_FREQ_T,
@@ -558,6 +742,9 @@ mod tests {
             (STEAM, "Steam"),
             (LAVA, "Lava"),
             (OBSIDIAN, "Obsidian"),
+            (PLANT, "Plant"),
+            (EMBER, "Ember"),
+            (ASH, "Ash"),
         ] {
             assert_eq!(
                 MATERIALS[id as usize].name, name,
@@ -573,6 +760,7 @@ mod tests {
             for (target, edge) in [
                 (m.params.becomes_above, "above"),
                 (m.params.becomes_below, "below"),
+                (m.params.sprouts, "sprout"),
             ] {
                 assert!(
                     target == NO_TRANSITION || target < MATERIAL_COUNT,
@@ -614,8 +802,8 @@ mod layout {
 
     #[test]
     fn material_params_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<MaterialParams>(), 96, "size");
-        let expected: [(&str, usize); 21] = [
+        assert_eq!(std::mem::size_of::<MaterialParams>(), 112, "size");
+        let expected: [(&str, usize); 25] = [
             ("colour", 0),
             ("freq_n", 16),
             ("freq_t", 20),
@@ -637,6 +825,10 @@ mod layout {
             ("becomes_above", 84),
             ("below_point", 88),
             ("becomes_below", 92),
+            ("bond_freq", 96),
+            ("heat_release", 100),
+            ("growth_period", 104),
+            ("sprouts", 108),
         ];
         let actual = [
             ("colour", std::mem::offset_of!(MaterialParams, colour)),
@@ -690,6 +882,16 @@ mod layout {
                 "becomes_below",
                 std::mem::offset_of!(MaterialParams, becomes_below),
             ),
+            ("bond_freq", std::mem::offset_of!(MaterialParams, bond_freq)),
+            (
+                "heat_release",
+                std::mem::offset_of!(MaterialParams, heat_release),
+            ),
+            (
+                "growth_period",
+                std::mem::offset_of!(MaterialParams, growth_period),
+            ),
+            ("sprouts", std::mem::offset_of!(MaterialParams, sprouts)),
         ];
         assert_eq!(actual, expected);
     }

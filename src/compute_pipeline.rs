@@ -103,7 +103,7 @@ pub struct SpawnRequest {
     pub radius: f32,
     pub material: u32,
     pub temperature: f32,
-    pub _padding: f32,
+    pub budget: u32,
 }
 
 unsafe impl bytemuck::Zeroable for SpawnRequest {}
@@ -136,7 +136,7 @@ struct SpawnHeader {
 unsafe impl bytemuck::Zeroable for SpawnHeader {}
 unsafe impl bytemuck::Pod for SpawnHeader {}
 
-const _: () = assert!(std::mem::size_of::<SpawnHeader>() % 8 == 0);
+const _: () = assert!(std::mem::size_of::<SpawnHeader>().is_multiple_of(8));
 
 const NO_CONTACT: u32 = 0xFFFF_FFFF;
 
@@ -160,6 +160,9 @@ pub struct Solver {
     scan_pipeline: ComputePipeline,
     scatter_pipeline: ComputePipeline,
     solve_pipeline: ComputePipeline,
+    plants_pipeline: ComputePipeline,
+    grow_pipeline: ComputePipeline,
+    growing: bool,
     slot_bound: u32,
     cell_counts: Buffer,
     counts_stale: bool,
@@ -178,7 +181,7 @@ pub struct Solver {
 
 struct Spawner {
     batch_buffer: Buffer,
-    state_buffer: Buffer,
+    allocator: Buffer,
     blocked_buffer: Buffer,
     bind_group: BindGroup,
     check_pipeline: ComputePipeline,
@@ -206,7 +209,7 @@ impl Solver {
         let cell_count = grid[0] * grid[1];
         let padded_cells = cell_count.div_ceil(4) * 4;
         assert!(
-            padded_cells % 4 == 0 && SCAN_WORKGROUP == 256,
+            padded_cells.is_multiple_of(4) && SCAN_WORKGROUP == 256,
             "scan_cells reads counts four at a time from one 256-thread workgroup",
         );
         let device = &gpu_context.device;
@@ -302,6 +305,14 @@ impl Solver {
             );
         }
 
+        let spawn = Spawner::new(
+            gpu_context,
+            &particle_buffer,
+            &contact_buffer,
+            capacity,
+            slot_bound,
+        );
+
         let storage = |read_only: bool| wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Storage { read_only },
             has_dynamic_offset: false,
@@ -331,6 +342,7 @@ impl Solver {
                 ),
                 entry(6, storage(false)),
                 entry(7, storage(true)),
+                entry(8, storage(false)),
             ],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -373,6 +385,10 @@ impl Solver {
                     binding: 7,
                     resource: materials_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: spawn.allocator.as_entire_binding(),
+                },
             ],
         });
 
@@ -392,14 +408,6 @@ impl Solver {
             })
         };
 
-        let spawn = Spawner::new(
-            gpu_context,
-            &particle_buffer,
-            &contact_buffer,
-            capacity,
-            slot_bound,
-        );
-
         Self {
             particle_buffer,
             bind_group,
@@ -407,6 +415,9 @@ impl Solver {
             scan_pipeline: pipeline("Scan Cells", &scan_shader, "scan_cells"),
             scatter_pipeline: pipeline("Scatter Particles", &shader, "scatter_particles"),
             solve_pipeline: pipeline("Solve Contacts", &shader, "solve"),
+            plants_pipeline: pipeline("Plant Forces", &shader, "plant_forces"),
+            grow_pipeline: pipeline("Grow Plants", &shader, "grow"),
+            growing: false,
             slot_bound,
             cell_counts,
             counts_stale: true,
@@ -504,6 +515,22 @@ impl Solver {
                 )),
             );
         }
+    }
+
+    /// Grows plants by one node per ready shoot tip. New nodes land in slots
+    /// the cell counts and `slot_bound` do not know about yet, so both are
+    /// refreshed: the counts next frame, the bound once the readback lands.
+    fn record_grow(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Grow Pass"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(0, &self.bind_group, &[self.params_offset()]);
+        pass.set_pipeline(&self.grow_pipeline);
+        pass.dispatch_workgroups(self.slot_bound.div_ceil(WORKGROUP_SIZE), 1, 1);
+        drop(pass);
+        self.counts_stale = true;
+        self.spawn.count_stale = true;
     }
 
     fn params_offset(&self) -> u32 {
@@ -624,6 +651,7 @@ impl Solver {
 
     pub fn spawn(&mut self, request: SpawnRequest) {
         if self.spawn.pending.len() < config::MAX_SPAWNS_PER_FRAME as usize {
+            self.growing |= request.budget > 0;
             self.spawn.pending.push(request);
         }
     }
@@ -633,6 +661,8 @@ impl Solver {
         match span {
             Span::Scan => (&self.scan_pipeline, [1, 1, 1]),
             Span::Scatter => (&self.scatter_pipeline, particle_groups),
+            Span::Plants if !self.growing => (&self.plants_pipeline, [0, 1, 1]),
+            Span::Plants => (&self.plants_pipeline, particle_groups),
             Span::Solve => (&self.solve_pipeline, particle_groups),
         }
     }
@@ -651,6 +681,7 @@ impl Solver {
             let bound = bound.min(config::MAX_PARTICLES);
             if bound != self.slot_bound {
                 self.slot_bound = bound;
+                self.counts_stale = true;
                 self.write_params(gpu_context);
             }
         }
@@ -713,7 +744,9 @@ impl Solver {
                     });
                     pass.set_bind_group(0, &self.bind_group, &[offset]);
                     pass.set_pipeline(pipeline);
-                    pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
+                    if groups[0] > 0 {
+                        pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
+                    }
                 }
                 self.contact_parity ^= 1;
             }
@@ -730,11 +763,16 @@ impl Solver {
                 pass.set_bind_group(0, &self.bind_group, &[self.params_offset()]);
                 for span in Span::ALL {
                     let (pipeline, groups) = self.dispatch(span);
-                    pass.set_pipeline(pipeline);
-                    pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
+                    if groups[0] > 0 {
+                        pass.set_pipeline(pipeline);
+                        pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
+                    }
                 }
                 self.contact_parity ^= 1;
             }
+        }
+        if substeps > 0 && self.growing {
+            self.record_grow(&mut encoder);
         }
 
         let reading = self.spawn.record_readback(&mut encoder);
@@ -765,15 +803,15 @@ impl Spawner {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/spawn.wgsl").into()),
         });
 
-        let free_stack: Vec<u32> = (seeded..capacity).rev().collect();
-        let free_stack_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Free Slots"),
-            contents: bytemuck::cast_slice(&free_stack),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let state_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Spawn State"),
-            contents: bytemuck::cast_slice(&[capacity - seeded, seeded]),
+        // Free count and high-water mark, then the stack of free slots: one
+        // buffer so the solver's `grow` can allocate within its binding limit.
+        let allocator: Vec<u32> = [capacity - seeded, seeded]
+            .into_iter()
+            .chain((seeded..capacity).rev())
+            .collect();
+        let allocator = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Slot Allocator"),
+            contents: bytemuck::cast_slice(&allocator),
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -830,7 +868,6 @@ impl Spawner {
                     },
                 ),
                 entry(3, storage),
-                entry(4, storage),
                 entry(
                     5,
                     wgpu::BindingType::Buffer {
@@ -860,11 +897,7 @@ impl Spawner {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: state_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: free_stack_buffer.as_entire_binding(),
+                    resource: allocator.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -895,7 +928,7 @@ impl Spawner {
 
         Self {
             batch_buffer,
-            state_buffer,
+            allocator,
             blocked_buffer,
             bind_group,
             check_pipeline: pipeline("Check Spawns", "check_spawns"),
@@ -993,7 +1026,7 @@ impl Spawner {
         if !self.wants_readback() {
             return false;
         }
-        encoder.copy_buffer_to_buffer(&self.state_buffer, 0, &self.readback, 0, 8);
+        encoder.copy_buffer_to_buffer(&self.allocator, 0, &self.readback, 0, 8);
         self.count_stale = false;
         self.readback_in_flight = true;
         self.requested_since_copy = 0;
