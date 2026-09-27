@@ -8,6 +8,7 @@ use crate::{
 
 pub struct Model {
     solver: Solver,
+    seeded: u32,
 }
 
 impl Model {
@@ -15,6 +16,7 @@ impl Model {
         let particles = ecs::seed_world(config::PARTICLE_COUNT);
         Self {
             solver: Solver::new(gpu_context, &particles),
+            seeded: particles.len() as u32,
         }
     }
 
@@ -65,6 +67,10 @@ impl Model {
 
     pub fn live_count(&self) -> u32 {
         self.solver.live_count()
+    }
+
+    pub fn placed_count(&self) -> u32 {
+        self.live_count().saturating_sub(self.seeded)
     }
 
     pub fn paint(&mut self, centre: [f32; 2], material: u32, radius: f32) {

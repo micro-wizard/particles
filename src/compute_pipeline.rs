@@ -416,7 +416,7 @@ impl Solver {
             scatter_pipeline: pipeline("Scatter Particles", &shader, "scatter_particles"),
             solve_pipeline: pipeline("Solve Contacts", &shader, "solve"),
             plants_pipeline: pipeline("Plant Forces", &shader, "plant_forces"),
-            grow_pipeline: pipeline("Grow Plants", &shader, "grow"),
+            grow_pipeline: pipeline("Grow Plants And Emit Flames", &shader, "grow_and_emit"),
             growing: false,
             slot_bound,
             cell_counts,
@@ -517,12 +517,13 @@ impl Solver {
         }
     }
 
-    /// Grows plants by one node per ready shoot tip. New nodes land in slots
-    /// the cell counts and `slot_bound` do not know about yet, so both are
-    /// refreshed: the counts next frame, the bound once the readback lands.
+    /// Grows plants by one node per ready shoot tip and sheds a flame from
+    /// each ready piece of burning fuel. New particles land in slots the cell
+    /// counts and `slot_bound` do not know about yet, so both are refreshed:
+    /// the counts next frame, the bound once the readback lands.
     fn record_grow(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Grow Pass"),
+            label: Some("Grow And Emit Pass"),
             timestamp_writes: None,
         });
         pass.set_bind_group(0, &self.bind_group, &[self.params_offset()]);

@@ -16,6 +16,7 @@ pub struct Stats {
     frame_times: VecDeque<f32>,
     substeps: u32,
     simulated: f32,
+    wanted: f32,
     elapsed: f32,
     since_log: f32,
 }
@@ -26,6 +27,7 @@ impl Stats {
             frame_times: VecDeque::with_capacity(SAMPLE_WINDOW),
             substeps: 0,
             simulated: 0.0,
+            wanted: 0.0,
             elapsed: 0.0,
             since_log: 0.0,
         }
@@ -34,6 +36,7 @@ impl Stats {
     pub fn record(
         &mut self,
         frame_dt: f32,
+        time_scale: f32,
         substeps: u32,
         particles: u32,
         passes: Option<[f32; Span::ALL.len()]>,
@@ -45,35 +48,44 @@ impl Stats {
         self.substeps = substeps;
 
         self.simulated += substeps as f32 * config::SUBSTEP;
+        self.wanted += frame_dt * time_scale;
         self.elapsed += frame_dt;
         if self.elapsed > 2.0 {
             self.simulated *= 0.5;
+            self.wanted *= 0.5;
             self.elapsed *= 0.5;
         }
 
         self.since_log += frame_dt;
         if self.since_log >= LOG_INTERVAL {
             self.since_log = 0.0;
-            let mean = self.mean_frame_time();
-
-            let gpu = passes.map_or(String::new(), |ms| {
-                let per_pass = Span::ALL
-                    .iter()
-                    .zip(ms)
-                    .map(|(span, value)| format!(" {}_ms={value:.3}", span.label()))
-                    .collect::<String>();
-                format!("{per_pass} gpu_total_ms={:.3}", ms.iter().sum::<f32>())
-            });
-            log::info!(
-                "[perf] particles={particles} fps={:.0} mean_ms={:.2} worst_ms={:.2} \
-                 substeps={substeps} of {} sim_speed={:.3}{gpu}",
-                if mean > 0.0 { 1.0 / mean } else { 0.0 },
-                mean * 1000.0,
-                self.worst_frame_time() * 1000.0,
-                config::MAX_SUBSTEPS,
-                self.sim_speed(),
-            );
+            self.log_performance(substeps, particles, passes);
         }
+    }
+
+    fn log_performance(
+        &self,
+        substeps: u32,
+        particles: u32,
+        passes: Option<[f32; Span::ALL.len()]>,
+    ) {
+        let gpu = passes.map_or(String::new(), |ms| {
+            let per_pass = Span::ALL
+                .iter()
+                .zip(ms)
+                .map(|(span, value)| format!(" {}_ms={value:.3}", span.label()))
+                .collect::<String>();
+            format!("{per_pass} gpu_total_ms={:.3}", ms.iter().sum::<f32>())
+        });
+        log::info!(
+            "[perf] particles={particles} fps={:.0} mean_ms={:.2} worst_ms={:.2} \
+             substeps={substeps} of {} sim_speed={:.3}{gpu}",
+            self.frames_per_second(),
+            self.mean_frame_time() * 1000.0,
+            self.worst_frame_time() * 1000.0,
+            config::MAX_SUBSTEPS,
+            self.sim_speed(),
+        );
     }
 
     fn mean_frame_time(&self) -> f32 {
@@ -81,6 +93,27 @@ impl Stats {
             return 0.0;
         }
         self.frame_times.iter().sum::<f32>() / self.frame_times.len() as f32
+    }
+
+    fn readout(&self, particles: u32) -> Readout {
+        Readout {
+            fps: self.frames_per_second(),
+            particles,
+            lagging_speed: self.falling_behind().then(|| self.sim_speed()),
+        }
+    }
+
+    fn falling_behind(&self) -> bool {
+        self.simulated < KEEPING_UP * self.wanted
+    }
+
+    fn frames_per_second(&self) -> f32 {
+        let mean = self.mean_frame_time();
+        if mean > 0.0 {
+            1.0 / mean
+        } else {
+            0.0
+        }
     }
 
     fn worst_frame_time(&self) -> f32 {
@@ -120,6 +153,18 @@ struct Brush {
     radius: f32,
 }
 
+impl Default for Brush {
+    fn default() -> Self {
+        Self {
+            mode: BrushMode::Paint,
+            material: 0,
+            heat_rate: 720.0,
+            wind_speed: 2000.0,
+            radius: 6.0,
+        }
+    }
+}
+
 pub struct Overlay {
     context: egui::Context,
     renderer: egui_wgpu::Renderer,
@@ -138,6 +183,8 @@ pub struct Overlay {
     brush: Brush,
 
     time_passes: bool,
+
+    time_scale: f32,
 
     fullscreen_requested: bool,
 
@@ -166,15 +213,9 @@ impl Overlay {
             materials,
             globals,
             selected: 0,
-            brush: Brush {
-                mode: BrushMode::Paint,
-                material: 0,
-                heat_rate: 720.0,
-
-                wind_speed: 2000.0,
-                radius: 6.0,
-            },
+            brush: Brush::default(),
             time_passes: false,
+            time_scale: REAL_TIME,
             fullscreen_requested: false,
             menu_height: 0.0,
             paint_jobs: Vec::new(),
@@ -292,6 +333,10 @@ impl Overlay {
         self.time_passes
     }
 
+    pub fn time_scale(&self) -> f32 {
+        self.time_scale
+    }
+
     pub fn captures_pointer(&self) -> bool {
         self.captured
     }
@@ -341,6 +386,8 @@ impl Overlay {
         let time_passes = &mut self.time_passes;
         let fullscreen_requested = &mut self.fullscreen_requested;
         let show_developer = self.show_developer;
+        let time_scale = &mut self.time_scale;
+        let readout = self.stats.readout(particle_count);
 
         let output = self.context.run(raw, |ctx| {
             let state = MenuState {
@@ -348,6 +395,8 @@ impl Overlay {
                 colours: &colours,
                 fullscreen,
                 world: &mut *globals,
+                time_scale: &mut *time_scale,
+                readout,
             };
             if menu(ctx, panel, scale, state) {
                 *fullscreen_requested = true;
@@ -590,7 +639,8 @@ const UNDERLINE_TOP: i32 = TEXT_TOP + pixel_font::HEIGHT + 2;
 const NAME_GAP: i32 = 4;
 
 const CHIP: i32 = pixel_font::HEIGHT;
-const SLIDER_WIDTH: i32 = 64;
+const SLIDER_WIDTH: i32 = 54;
+const SNAP_PIXELS: i32 = 2;
 const HANDLE_WIDTH: i32 = 3;
 
 const fn hex(rgb: u32) -> egui::Color32 {
@@ -613,12 +663,26 @@ struct MenuSlider {
     label: &'static str,
     low: f32,
     high: f32,
+    show: fn(f32) -> String,
     tip: &'static str,
 }
 
 impl MenuSlider {
     fn width(&self) -> i32 {
-        pixel_font::width(self.label) + NAME_GAP + SLIDER_WIDTH
+        pixel_font::width(self.label) + NAME_GAP + SLIDER_WIDTH + NAME_GAP + self.value_width()
+    }
+
+    fn value_width(&self) -> i32 {
+        let widest = |value| pixel_font::width(&(self.show)(value));
+        widest(self.low).max(widest(self.high))
+    }
+
+    fn snapped(&self, value: f32, default: f32) -> f32 {
+        if (self.offset_of(value) - self.offset_of(default)).abs() <= SNAP_PIXELS {
+            default
+        } else {
+            value
+        }
     }
 
     fn offset_of(&self, value: f32) -> i32 {
@@ -628,10 +692,27 @@ impl MenuSlider {
     }
 }
 
+fn without_negative_zero(value: f32) -> f32 {
+    if value == 0.0 {
+        0.0
+    } else {
+        value
+    }
+}
+
+fn whole_number(value: f32) -> String {
+    format!("{:.0}", without_negative_zero(value.round()))
+}
+
+fn times(value: f32) -> String {
+    format!("{value:.2}X")
+}
+
 const BRUSH_SIZE: MenuSlider = MenuSlider {
     label: "Size",
     low: 0.0,
     high: config::BRUSH_RADIUS_LIMIT,
+    show: whole_number,
     tip: "How far the brush reaches: the red circle around the cursor.",
 };
 
@@ -639,6 +720,7 @@ const BRUSH_RATE: MenuSlider = MenuSlider {
     label: "Rate",
     low: 60.0,
     high: 3600.0,
+    show: whole_number,
     tip: "How fast Heat and Cool change the temperature, in degrees per second.",
 };
 
@@ -646,11 +728,43 @@ const BRUSH_FORCE: MenuSlider = MenuSlider {
     label: "Force",
     low: 100.0,
     high: 3000.0,
+    show: whole_number,
     tip: "How hard Blow and Burst push: the speed of the air they make. Steam goes \
           with the gentlest breeze, sand with about half, and gravel wants most of it.",
 };
 
 const BRUSH_SLIDERS: [MenuSlider; 3] = [BRUSH_SIZE, BRUSH_RATE, BRUSH_FORCE];
+
+const TIME_ACCENT: egui::Color32 = hex(0xd3869b);
+
+const SIM_SPEED: MenuSlider = MenuSlider {
+    label: "Speed",
+    low: 0.0,
+    high: 2.0,
+    show: times,
+    tip: "How fast time runs: 1 is real time and 0 pauses. Above 1 a slow computer can \
+          fall behind, and the readout beside it then shows the speed actually reached.",
+};
+
+const REAL_TIME: f32 = 1.0;
+const KEEPING_UP: f32 = 0.95;
+
+#[derive(Copy, Clone)]
+struct Readout {
+    fps: f32,
+    particles: u32,
+    lagging_speed: Option<f32>,
+}
+
+impl Readout {
+    fn text(&self) -> String {
+        let counts = format!("{:.0} FPS  {} PARTICLES", self.fps, self.particles);
+        match self.lagging_speed {
+            Some(speed) => format!("{counts}  RUNNING {speed:.2}X"),
+            None => counts,
+        }
+    }
+}
 
 const WORLD_SLIDERS: [(MenuSlider, egui::Color32); 3] = [
     (
@@ -658,6 +772,7 @@ const WORLD_SLIDERS: [(MenuSlider, egui::Color32); 3] = [
             label: "Gravity",
             low: 0.0,
             high: 450.0,
+            show: whole_number,
             tip: "How hard everything falls. At zero, grains drift where they are left.",
         },
         TEXT_HOVER,
@@ -667,6 +782,7 @@ const WORLD_SLIDERS: [(MenuSlider, egui::Color32); 3] = [
             label: "Temp",
             low: -40.0,
             high: 300.0,
+            show: whole_number,
             tip: "The temperature everything settles to: the walls hold it and the air \
                   slowly brings every exposed grain to it. Water freezes below 0 and boils \
                   above 100, and plants catch fire at 250.",
@@ -678,6 +794,7 @@ const WORLD_SLIDERS: [(MenuSlider, egui::Color32); 3] = [
             label: "Wind",
             low: -1000.0,
             high: 1000.0,
+            show: whole_number,
             tip: "A breeze across the whole world, blowing whichever way the slider leans \
                   from centre. Light grains go first, and only surfaces feel it.",
         },
@@ -745,7 +862,7 @@ impl Piece {
             }
             Piece::Swatch(id) => CHIP + NAME_GAP + pixel_font::width(MATERIALS[id].name),
             Piece::Controls => {
-                slider_label_width() + NAME_GAP + SLIDER_WIDTH + ITEM_GAP + FULLSCREEN.width
+                slider_label_width() + NAME_GAP + SLIDER_WIDTH + NAME_GAP + slider_value_width()
             }
             Piece::World => {
                 WORLD_SLIDERS
@@ -782,17 +899,26 @@ fn menu_rows(width: i32) -> Vec<Vec<Piece>> {
         .chain([Piece::Controls, Piece::World]);
     let mut rows: Vec<Vec<Piece>> = Vec::new();
     for piece in pieces {
+        let limit = width - reserved_for_fullscreen(rows.len().saturating_sub(1));
         match rows.last_mut() {
-            Some(row)
-                if row_width(row) + piece.gap_after(row[row.len() - 1]) + piece.width()
-                    <= width =>
-            {
-                row.push(piece)
-            }
+            Some(row) if fits_in(row, piece, limit) => row.push(piece),
             _ => rows.push(vec![piece]),
         }
     }
     rows
+}
+
+fn fits_in(row: &[Piece], piece: Piece, limit: i32) -> bool {
+    let previous = row[row.len() - 1];
+    row_width(row) + piece.gap_after(previous) + piece.width() <= limit
+}
+
+fn reserved_for_fullscreen(row_index: usize) -> i32 {
+    if row_index == 0 {
+        FULLSCREEN_RESERVE
+    } else {
+        0
+    }
 }
 
 fn row_width(row: &[Piece]) -> i32 {
@@ -801,6 +927,14 @@ fn row_width(row: &[Piece]) -> i32 {
             .windows(2)
             .map(|pair| pair[1].gap_after(pair[0]))
             .sum::<i32>()
+}
+
+fn slider_value_width() -> i32 {
+    BRUSH_SLIDERS
+        .iter()
+        .map(MenuSlider::value_width)
+        .max()
+        .unwrap_or(0)
 }
 
 fn slider_label_width() -> i32 {
@@ -834,6 +968,8 @@ struct MenuState<'a> {
     colours: &'a [[f32; 4]],
     fullscreen: Option<bool>,
     world: &'a mut Globals,
+    time_scale: &'a mut f32,
+    readout: Readout,
 }
 
 fn menu(ctx: &egui::Context, panel: egui::Rect, scale: f32, mut state: MenuState<'_>) -> bool {
@@ -859,13 +995,16 @@ fn menu_contents(
 
     let rows = menu_rows(columns - 2 * MENU_PAD);
     let rows_height = rows.len() as i32 * (ROW_HEIGHT + ROW_GAP) - ROW_GAP;
-    let mut top = ((height - rows_height) / 2).max(MENU_PAD);
-    let mut toggled = false;
-    for row in &rows {
-        toggled |= menu_row(ui, grid, row, [(columns - row_width(row)) / 2, top], state);
-        top += ROW_HEIGHT + ROW_GAP;
+    let first_top = ((height - rows_height) / 2).max(MENU_PAD);
+    for (i, row) in rows.iter().enumerate() {
+        let room = columns - reserved_for_fullscreen(i);
+        let top = first_top + i as i32 * (ROW_HEIGHT + ROW_GAP);
+        menu_row(ui, grid, row, [(room - row_width(row)) / 2, top], state);
     }
-    toggled
+    let corner = columns - MENU_PAD - FULLSCREEN.width;
+    state
+        .fullscreen
+        .is_some_and(|fullscreen| fullscreen_toggle(ui, grid, corner, first_top, fullscreen))
 }
 
 fn menu_row(
@@ -874,17 +1013,15 @@ fn menu_row(
     row: &[Piece],
     at: [i32; 2],
     state: &mut MenuState<'_>,
-) -> bool {
+) {
     let [mut left, top] = at;
-    let mut toggled = false;
     for (i, &piece) in row.iter().enumerate() {
         if i > 0 {
             left += piece.gap_after(row[i - 1]);
         }
-        toggled |= menu_piece(ui, grid, piece, [left, top], state);
+        menu_piece(ui, grid, piece, [left, top], state);
         left += piece.width();
     }
-    toggled
 }
 
 fn menu_piece(
@@ -893,15 +1030,18 @@ fn menu_piece(
     piece: Piece,
     at: [i32; 2],
     state: &mut MenuState<'_>,
-) -> bool {
+) {
     let [x, y] = at;
     match piece {
         Piece::Tools => tools(ui, grid, x, y, state.brush),
         Piece::Swatch(id) => swatch(ui, grid, x, y, state.brush, id, state.colours[id]),
-        Piece::Controls => return controls(ui, grid, x, y, state.brush, state.fullscreen),
-        Piece::World => world_controls(ui, grid, x, y, state.world),
+        Piece::Controls => controls(ui, grid, x, y, state.brush),
+        Piece::World => {
+            world_sliders(ui, grid, [x, y], state.world);
+            let second = y + ROW_HEIGHT - pixel_font::HEIGHT;
+            clock(ui, grid, [x, second], state.time_scale, &state.readout);
+        }
     }
-    false
 }
 
 fn menu_item(
@@ -1007,55 +1147,89 @@ fn swatch(
     }
 }
 
-fn controls(
-    ui: &mut egui::Ui,
-    grid: pixel_font::Grid,
-    x: i32,
-    y: i32,
-    brush: &mut Brush,
-    fullscreen: Option<bool>,
-) -> bool {
+fn controls(ui: &mut egui::Ui, grid: pixel_font::Grid, x: i32, y: i32, brush: &mut Brush) {
     let accent = accent(brush.mode);
+    let defaults = Brush::default();
     let label_width = slider_label_width();
     let place = |y| SliderPlace { x, y, label_width };
-    menu_slider(
-        ui,
-        grid,
-        place(y),
-        &BRUSH_SIZE,
-        &mut brush.radius,
-        Some(accent),
-    );
+    let size = Setting {
+        value: &mut brush.radius,
+        default: defaults.radius,
+    };
+    menu_slider(ui, grid, place(y), &BRUSH_SIZE, size, Some(accent));
 
     let enabled = brush.mode != BrushMode::Paint;
-    let (slider, value) = match brush.mode {
-        BrushMode::Blow | BrushMode::Burst => (&BRUSH_FORCE, &mut brush.wind_speed),
-        BrushMode::Paint | BrushMode::Heat | BrushMode::Cool => (&BRUSH_RATE, &mut brush.heat_rate),
+    let (slider, value, default) = match brush.mode {
+        BrushMode::Blow | BrushMode::Burst => {
+            (&BRUSH_FORCE, &mut brush.wind_speed, defaults.wind_speed)
+        }
+        BrushMode::Paint | BrushMode::Heat | BrushMode::Cool => {
+            (&BRUSH_RATE, &mut brush.heat_rate, defaults.heat_rate)
+        }
     };
     let second = place(y + ROW_HEIGHT - pixel_font::HEIGHT);
-    menu_slider(ui, grid, second, slider, value, enabled.then_some(accent));
-
-    let icon = x + label_width + NAME_GAP + SLIDER_WIDTH + ITEM_GAP;
-    fullscreen.is_some_and(|fullscreen| fullscreen_toggle(ui, grid, icon, y, fullscreen))
+    let setting = Setting { value, default };
+    menu_slider(ui, grid, second, slider, setting, enabled.then_some(accent));
 }
 
-fn world_controls(ui: &mut egui::Ui, grid: pixel_font::Grid, x: i32, y: i32, world: &mut Globals) {
-    let values = [
-        &mut world.gravity,
-        &mut world.rest_temperature,
-        &mut world.wind,
+fn world_sliders(ui: &mut egui::Ui, grid: pixel_font::Grid, at: [i32; 2], world: &mut Globals) {
+    let [x, y] = at;
+    let defaults = Globals::default();
+    let settings = [
+        Setting {
+            value: &mut world.gravity,
+            default: defaults.gravity,
+        },
+        Setting {
+            value: &mut world.rest_temperature,
+            default: defaults.rest_temperature,
+        },
+        Setting {
+            value: &mut world.wind,
+            default: defaults.wind,
+        },
     ];
     let mut left = x;
-    for ((slider, accent), value) in WORLD_SLIDERS.iter().zip(values) {
+    for ((slider, accent), setting) in WORLD_SLIDERS.iter().zip(settings) {
         let label_width = pixel_font::width(slider.label);
         let place = SliderPlace {
             x: left,
-            y: y + TEXT_TOP,
+            y,
             label_width,
         };
-        menu_slider(ui, grid, place, slider, value, Some(*accent));
+        menu_slider(ui, grid, place, slider, setting, Some(*accent));
         left += slider.width() + ITEM_GAP;
     }
+}
+
+fn clock(
+    ui: &mut egui::Ui,
+    grid: pixel_font::Grid,
+    at: [i32; 2],
+    time_scale: &mut f32,
+    readout: &Readout,
+) {
+    let [x, y] = at;
+    let place = SliderPlace {
+        x,
+        y,
+        label_width: pixel_font::width(WORLD_SLIDERS[0].0.label),
+    };
+    let speed = Setting {
+        value: time_scale,
+        default: REAL_TIME,
+    };
+    menu_slider(ui, grid, place, &SIM_SPEED, speed, Some(TIME_ACCENT));
+    grid.text(ui.painter(), x + readout_offset(), y, &readout.text(), TEXT);
+}
+
+fn readout_offset() -> i32 {
+    pixel_font::width(WORLD_SLIDERS[0].0.label)
+        + NAME_GAP
+        + SLIDER_WIDTH
+        + NAME_GAP
+        + SIM_SPEED.value_width()
+        + ITEM_GAP
 }
 
 #[derive(Copy, Clone)]
@@ -1069,6 +1243,15 @@ impl SliderPlace {
     fn rail(self) -> i32 {
         self.x + self.label_width + NAME_GAP
     }
+
+    fn value_x(self) -> i32 {
+        self.rail() + SLIDER_WIDTH + NAME_GAP
+    }
+}
+
+struct Setting<'a> {
+    value: &'a mut f32,
+    default: f32,
 }
 
 struct SliderLook {
@@ -1082,36 +1265,50 @@ fn menu_slider(
     grid: pixel_font::Grid,
     place: SliderPlace,
     slider: &MenuSlider,
-    value: &mut f32,
+    mut setting: Setting<'_>,
     accent: Option<egui::Color32>,
 ) {
-    let hit = grid.rect(
-        place.rail() - NAME_GAP / 2,
-        place.y - 1,
-        SLIDER_WIDTH + NAME_GAP,
-        pixel_font::HEIGHT + 2,
-    );
     let sense = if accent.is_some() {
         egui::Sense::click_and_drag()
     } else {
         egui::Sense::hover()
     };
-    let response = ui.allocate_rect(hit, sense);
+    let response = ui.allocate_rect(slider_hit_area(grid, place), sense);
     if accent.is_some() {
-        drag_slider(&response, grid, place, slider, value);
-        nudge_slider(ui, &response, slider, value);
+        drag_slider(&response, grid, place, slider, &mut setting);
+        nudge_slider(ui, &response, slider, setting.value);
+        reset_on_double_click(&response, &mut setting);
     }
-    response
-        .widget_info(|| egui::WidgetInfo::slider(accent.is_some(), *value as f64, slider.label));
+    let value = *setting.value;
+    response.widget_info(|| egui::WidgetInfo::slider(accent.is_some(), value as f64, slider.label));
+    let look = slider_look(accent, &response);
     paint_slider(
         ui.painter(),
         grid,
         place,
         slider,
-        *value,
-        slider_look(accent, &response),
+        [value, setting.default],
+        look,
     );
-    response.on_hover_text(slider.tip);
+    response.on_hover_ui(|ui| {
+        ui.label(slider.tip);
+        ui.label("Double-click to reset.");
+    });
+}
+
+fn slider_hit_area(grid: pixel_font::Grid, place: SliderPlace) -> egui::Rect {
+    grid.rect(
+        place.rail() - NAME_GAP / 2,
+        place.y - 1,
+        SLIDER_WIDTH + NAME_GAP,
+        pixel_font::HEIGHT + 2,
+    )
+}
+
+fn reset_on_double_click(response: &egui::Response, setting: &mut Setting<'_>) {
+    if response.double_clicked() {
+        *setting.value = setting.default;
+    }
 }
 
 fn drag_slider(
@@ -1119,7 +1316,7 @@ fn drag_slider(
     grid: pixel_font::Grid,
     place: SliderPlace,
     slider: &MenuSlider,
-    value: &mut f32,
+    setting: &mut Setting<'_>,
 ) {
     let Some(pointer) = response.interact_pointer_pos() else {
         return;
@@ -1127,7 +1324,8 @@ fn drag_slider(
     let travel = SLIDER_WIDTH - HANDLE_WIDTH;
     let start = grid.rect(place.rail(), place.y, HANDLE_WIDTH, 1).center().x;
     let along = (pointer.x - start) / (travel as f32 * grid.rect(0, 0, 1, 1).width());
-    *value = slider.low + (slider.high - slider.low) * along.clamp(0.0, 1.0);
+    let dragged = slider.low + (slider.high - slider.low) * along.clamp(0.0, 1.0);
+    *setting.value = slider.snapped(dragged, setting.default);
 }
 
 fn nudge_slider(ui: &egui::Ui, response: &egui::Response, slider: &MenuSlider, value: &mut f32) {
@@ -1170,7 +1368,7 @@ fn paint_slider(
     grid: pixel_font::Grid,
     place: SliderPlace,
     slider: &MenuSlider,
-    value: f32,
+    [value, default]: [f32; 2],
     look: SliderLook,
 ) {
     let rail = place.rail();
@@ -1178,14 +1376,16 @@ fn paint_slider(
     let zero = slider.offset_of(0.0);
     grid.text(painter, place.x, place.y, slider.label, look.text);
     grid.fill(painter, rail, place.y + 2, SLIDER_WIDTH, 3, RAIL);
+    let filled = (handle - zero).abs();
     grid.fill(
         painter,
         rail + zero.min(handle),
         place.y + 2,
-        (handle - zero).abs(),
+        filled,
         3,
         look.fill,
     );
+    paint_default_mark(painter, grid, place, slider.offset_of(default));
     grid.fill(
         painter,
         rail + handle,
@@ -1194,6 +1394,24 @@ fn paint_slider(
         pixel_font::HEIGHT,
         look.knob,
     );
+    grid.text(
+        painter,
+        place.value_x(),
+        place.y,
+        &(slider.show)(value),
+        look.text,
+    );
+}
+
+fn paint_default_mark(
+    painter: &egui::Painter,
+    grid: pixel_font::Grid,
+    place: SliderPlace,
+    offset: i32,
+) {
+    let x = place.rail() + offset + HANDLE_WIDTH / 2;
+    grid.fill(painter, x, place.y, 1, 1, TEXT_DIM);
+    grid.fill(painter, x, place.y + pixel_font::HEIGHT - 1, 1, 1, TEXT_DIM);
 }
 
 fn brush_outline(
@@ -1293,6 +1511,8 @@ fn brush_outline(
         }
     }
 }
+
+const FULLSCREEN_RESERVE: i32 = GROUP_GAP + FULLSCREEN.width;
 
 const FULLSCREEN: pixel_font::Glyph = pixel_font::Glyph {
     width: 7,
@@ -1437,16 +1657,85 @@ mod tests {
         }
     }
 
+    fn longest_readout() -> Readout {
+        Readout {
+            fps: 999.0,
+            particles: config::MAX_PARTICLES,
+            lagging_speed: Some(1.99),
+        }
+    }
+
+    #[test]
+    fn the_longest_readout_fits_under_the_world_sliders() {
+        let line = readout_offset() + pixel_font::width(&longest_readout().text());
+        assert!(
+            line <= Piece::World.width(),
+            "{line} > {}",
+            Piece::World.width()
+        );
+    }
+
+    #[test]
+    fn dragging_near_a_default_snaps_to_it() {
+        let temperature = &WORLD_SLIDERS[1].0;
+        assert_eq!(temperature.snapped(23.0, 20.0), 20.0);
+        assert_eq!(
+            temperature.snapped(0.0, 20.0),
+            0.0,
+            "freezing must stay reachable"
+        );
+        assert_eq!(SIM_SPEED.snapped(0.95, REAL_TIME), REAL_TIME);
+        assert_eq!(SIM_SPEED.snapped(0.5, REAL_TIME), 0.5);
+    }
+
+    #[test]
+    fn values_never_read_negative_zero() {
+        assert_eq!(whole_number(-0.3), "0");
+        assert_eq!(whole_number(-40.0), "-40");
+    }
+
+    #[test]
+    fn every_slider_can_show_its_default() {
+        let brush = Brush::default();
+        let world = Globals::default();
+        let defaults = [
+            (&BRUSH_SIZE, brush.radius),
+            (&BRUSH_RATE, brush.heat_rate),
+            (&BRUSH_FORCE, brush.wind_speed),
+            (&WORLD_SLIDERS[0].0, world.gravity),
+            (&WORLD_SLIDERS[1].0, world.rest_temperature),
+            (&WORLD_SLIDERS[2].0, world.wind),
+            (&SIM_SPEED, REAL_TIME),
+        ];
+        for (slider, value) in defaults {
+            assert!(
+                (slider.low..=slider.high).contains(&value),
+                "{} cannot show its default of {value}",
+                slider.label,
+            );
+        }
+    }
+
     #[test]
     fn every_menu_label_has_its_glyphs() {
+        let readout = longest_readout().text();
+        let values: Vec<String> = BRUSH_SLIDERS
+            .iter()
+            .chain(WORLD_SLIDERS.iter().map(|(slider, _)| slider))
+            .chain([&SIM_SPEED])
+            .flat_map(|slider| [(slider.show)(slider.low), (slider.show)(slider.high)])
+            .collect();
         let labels = TOOLS
             .iter()
             .map(|tool| tool.1)
             .chain(MATERIALS.iter().map(|material| material.name))
             .chain(BRUSH_SLIDERS.iter().map(|slider| slider.label))
-            .chain(WORLD_SLIDERS.iter().map(|(slider, _)| slider.label));
+            .chain(WORLD_SLIDERS.iter().map(|(slider, _)| slider.label))
+            .chain([SIM_SPEED.label, readout.as_str()])
+            .chain(values.iter().map(String::as_str));
         for label in labels {
-            assert!(label.chars().all(pixel_font::has_glyph), "{label}");
+            let mut drawn = label.chars().filter(|&c| c != ' ');
+            assert!(drawn.all(pixel_font::has_glyph), "{label}");
         }
     }
 }

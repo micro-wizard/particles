@@ -219,11 +219,9 @@ impl<'a> Controller<'a> {
                     return false;
                 }
 
-                let dt = now
-                    .duration_since(self.last_update)
-                    .as_secs_f32()
-                    .min(config::MAX_FRAME_TIME);
+                let elapsed = now.duration_since(self.last_update).as_secs_f32();
                 self.last_update = now;
+                let dt = elapsed.min(config::MAX_FRAME_TIME) * self.overlay.time_scale();
 
                 if self.is_left_mouse_button_pressed && !self.overlay.captures_pointer() {
                     if let Some(world) = self.view.screen_to_world(self.cursor_position) {
@@ -251,8 +249,10 @@ impl<'a> Controller<'a> {
                 self.model.update(dt, &self.gpu_context);
 
                 let scale = self.ui_scale();
+                let time_scale = self.overlay.time_scale();
                 self.overlay.stats.record(
-                    dt,
+                    elapsed,
+                    time_scale,
                     self.model.last_substeps(),
                     self.model.live_count(),
                     self.model.pass_timings(),
@@ -262,7 +262,7 @@ impl<'a> Controller<'a> {
                         size_in_pixels: [self.view.size.width, self.view.size.height],
                         pixels_per_point: scale,
                     },
-                    self.model.live_count(),
+                    self.model.placed_count(),
                     self.fullscreen_available
                         .then(|| self.view.window().fullscreen().is_some()),
                     self.view.world_rect(),

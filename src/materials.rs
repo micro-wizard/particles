@@ -28,9 +28,14 @@ pub struct MaterialParams {
     pub heat_release: f32,
     pub growth_period: f32,
     pub sprouts: u32,
+    pub emits: u32,
+    pub emit_period: f32,
+    pub burn_time: f32,
+    pub _padding: u32,
 }
 
 pub const NO_TRANSITION: u32 = u32::MAX;
+pub const VANISH: u32 = u32::MAX - 1;
 
 unsafe impl bytemuck::Zeroable for MaterialParams {}
 unsafe impl bytemuck::Pod for MaterialParams {}
@@ -52,10 +57,11 @@ pub const STEAM: u32 = 6;
 pub const LAVA: u32 = 7;
 pub const OBSIDIAN: u32 = 8;
 pub const PLANT: u32 = 10;
-pub const EMBER: u32 = 11;
+pub const CHAR: u32 = 11;
 pub const ASH: u32 = 12;
+pub const FIRE: u32 = 13;
 
-pub const MATERIALS: [Material; 13] = [
+pub const MATERIALS: [Material; 14] = [
     Material {
         name: "Sand",
         palette: true,
@@ -85,6 +91,10 @@ pub const MATERIALS: [Material; 13] = [
             heat_release: 0.0,
             growth_period: 0.0,
             sprouts: NO_TRANSITION,
+            emits: NO_TRANSITION,
+            emit_period: 0.0,
+            burn_time: 0.0,
+            _padding: 0,
         },
     },
     Material {
@@ -116,6 +126,10 @@ pub const MATERIALS: [Material; 13] = [
             heat_release: 0.0,
             growth_period: 0.0,
             sprouts: NO_TRANSITION,
+            emits: NO_TRANSITION,
+            emit_period: 0.0,
+            burn_time: 0.0,
+            _padding: 0,
         },
     },
     Material {
@@ -147,6 +161,10 @@ pub const MATERIALS: [Material; 13] = [
             heat_release: 0.0,
             growth_period: 0.0,
             sprouts: NO_TRANSITION,
+            emits: NO_TRANSITION,
+            emit_period: 0.0,
+            burn_time: 0.0,
+            _padding: 0,
         },
     },
     Material {
@@ -178,6 +196,10 @@ pub const MATERIALS: [Material; 13] = [
             heat_release: 0.0,
             growth_period: 0.0,
             sprouts: NO_TRANSITION,
+            emits: NO_TRANSITION,
+            emit_period: 0.0,
+            burn_time: 0.0,
+            _padding: 0,
         },
     },
     Material {
@@ -209,6 +231,10 @@ pub const MATERIALS: [Material; 13] = [
             heat_release: 0.0,
             growth_period: 0.0,
             sprouts: NO_TRANSITION,
+            emits: NO_TRANSITION,
+            emit_period: 0.0,
+            burn_time: 0.0,
+            _padding: 0,
         },
     },
     Material {
@@ -240,6 +266,10 @@ pub const MATERIALS: [Material; 13] = [
             heat_release: 0.0,
             growth_period: 0.0,
             sprouts: NO_TRANSITION,
+            emits: NO_TRANSITION,
+            emit_period: 0.0,
+            burn_time: 0.0,
+            _padding: 0,
         },
     },
     Material {
@@ -273,6 +303,10 @@ pub const MATERIALS: [Material; 13] = [
             heat_release: 0.0,
             growth_period: 0.0,
             sprouts: NO_TRANSITION,
+            emits: NO_TRANSITION,
+            emit_period: 0.0,
+            burn_time: 0.0,
+            _padding: 0,
         },
     },
     Material {
@@ -312,6 +346,10 @@ pub const MATERIALS: [Material; 13] = [
             heat_release: 0.0,
             growth_period: 0.0,
             sprouts: NO_TRANSITION,
+            emits: NO_TRANSITION,
+            emit_period: 0.0,
+            burn_time: 0.0,
+            _padding: 0,
         },
     },
     Material {
@@ -349,6 +387,10 @@ pub const MATERIALS: [Material; 13] = [
             heat_release: 0.0,
             growth_period: 0.0,
             sprouts: NO_TRANSITION,
+            emits: NO_TRANSITION,
+            emit_period: 0.0,
+            burn_time: 0.0,
+            _padding: 0,
         },
     },
     Material {
@@ -373,13 +415,17 @@ pub const MATERIALS: [Material; 13] = [
             default_temperature: config::AMBIENT_TEMPERATURE,
             thermal_expansion: 0.0,
             above_point: 250.0,
-            becomes_above: EMBER,
+            becomes_above: CHAR,
             below_point: 0.0,
             becomes_below: NO_TRANSITION,
             bond_freq: 60.0,
             heat_release: 0.0,
             growth_period: 0.2,
             sprouts: PLANT,
+            emits: NO_TRANSITION,
+            emit_period: 0.0,
+            burn_time: 0.0,
+            _padding: 0,
         },
     },
     Material {
@@ -404,20 +450,24 @@ pub const MATERIALS: [Material; 13] = [
             default_temperature: config::AMBIENT_TEMPERATURE,
             thermal_expansion: 0.0,
             above_point: 250.0,
-            becomes_above: EMBER,
+            becomes_above: CHAR,
             below_point: 0.0,
             becomes_below: NO_TRANSITION,
             bond_freq: 60.0,
             heat_release: 0.0,
             growth_period: 0.2,
             sprouts: PLANT,
+            emits: NO_TRANSITION,
+            emit_period: 0.0,
+            burn_time: 0.0,
+            _padding: 0,
         },
     },
     Material {
-        name: "Ember",
+        name: "Char",
         palette: false,
         params: MaterialParams {
-            colour: [1.000, 0.550, 0.120, 1.0],
+            colour: [0.300, 0.140, 0.090, 1.0],
             freq_n: 60.0,
             freq_t: 20.0,
             zeta_n: 0.30,
@@ -439,9 +489,13 @@ pub const MATERIALS: [Material; 13] = [
             below_point: 150.0,
             becomes_below: PLANT,
             bond_freq: 60.0,
-            heat_release: 450.0,
+            heat_release: 250.0,
             growth_period: 0.0,
             sprouts: NO_TRANSITION,
+            emits: FIRE,
+            emit_period: 0.05,
+            burn_time: 1.5,
+            _padding: 0,
         },
     },
     Material {
@@ -473,6 +527,45 @@ pub const MATERIALS: [Material; 13] = [
             heat_release: 0.0,
             growth_period: 0.0,
             sprouts: NO_TRANSITION,
+            emits: NO_TRANSITION,
+            emit_period: 0.0,
+            burn_time: 0.0,
+            _padding: 0,
+        },
+    },
+    Material {
+        name: "Fire",
+        palette: false,
+        params: MaterialParams {
+            colour: [1.000, 0.620, 0.150, 1.0],
+            freq_n: 40.0,
+            freq_t: 10.0,
+            zeta_n: 0.90,
+            zeta_t: 0.90,
+            mu: 0.0,
+            density: 0.03,
+            radius: 0.7,
+            rest_packing: 0.0,
+            pressure_k: 0.0,
+            viscosity: 0.0,
+            is_static: 0.0,
+            spacing: 2.2,
+            conductivity: 100.0,
+            heat_capacity: 5.0,
+            default_temperature: 900.0,
+            thermal_expansion: 1.0,
+            above_point: 0.0,
+            becomes_above: NO_TRANSITION,
+            below_point: 400.0,
+            becomes_below: VANISH,
+            bond_freq: 0.0,
+            heat_release: -1250.0,
+            growth_period: 0.0,
+            sprouts: NO_TRANSITION,
+            emits: NO_TRANSITION,
+            emit_period: 0.0,
+            burn_time: 0.0,
+            _padding: 0,
         },
     },
 ];
@@ -747,8 +840,9 @@ mod tests {
             (LAVA, "Lava"),
             (OBSIDIAN, "Obsidian"),
             (PLANT, "Plant"),
-            (EMBER, "Ember"),
+            (CHAR, "Char"),
             (ASH, "Ash"),
+            (FIRE, "Fire"),
         ] {
             assert_eq!(
                 MATERIALS[id as usize].name, name,
@@ -765,14 +859,49 @@ mod tests {
                 (m.params.becomes_above, "above"),
                 (m.params.becomes_below, "below"),
                 (m.params.sprouts, "sprout"),
+                (m.params.emits, "emit"),
             ] {
                 assert!(
-                    target == NO_TRANSITION || target < MATERIAL_COUNT,
+                    target == NO_TRANSITION || target == VANISH || target < MATERIAL_COUNT,
                     "{}: {edge} transition targets id {target}, but there are only \
                      {MATERIAL_COUNT} materials",
                     m.name,
                 );
             }
+        }
+    }
+
+    #[test]
+    fn fire_burns_out_on_its_own() {
+        let fire = &MATERIALS[FIRE as usize].params;
+        assert_eq!(fire.becomes_below, VANISH);
+        let lifetime = (fire.default_temperature - fire.below_point) / -fire.heat_release;
+        assert!(
+            (0.0..1.0).contains(&lifetime),
+            "a lone flame lives {lifetime} s; it should flicker out in under a second",
+        );
+    }
+
+    #[test]
+    fn every_fuel_runs_out_into_something() {
+        for m in MATERIALS.iter().filter(|m| m.params.emits != NO_TRANSITION) {
+            assert!(
+                m.params.burn_time > 0.0 && m.params.becomes_above < MATERIAL_COUNT,
+                "{} sheds {} but never runs out of fuel into a real material",
+                m.name,
+                MATERIALS[m.params.emits as usize].name,
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_both_grows_and_emits() {
+        for m in MATERIALS.iter() {
+            assert!(
+                m.params.sprouts == NO_TRANSITION || m.params.emits == NO_TRANSITION,
+                "{} both sprouts and emits, but they share one clock",
+                m.name,
+            );
         }
     }
 
@@ -806,8 +935,8 @@ mod layout {
 
     #[test]
     fn material_params_matches_the_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<MaterialParams>(), 112, "size");
-        let expected: [(&str, usize); 25] = [
+        assert_eq!(std::mem::size_of::<MaterialParams>(), 128, "size");
+        let expected: [(&str, usize); 28] = [
             ("colour", 0),
             ("freq_n", 16),
             ("freq_t", 20),
@@ -833,6 +962,9 @@ mod layout {
             ("heat_release", 100),
             ("growth_period", 104),
             ("sprouts", 108),
+            ("emits", 112),
+            ("emit_period", 116),
+            ("burn_time", 120),
         ];
         let actual = [
             ("colour", std::mem::offset_of!(MaterialParams, colour)),
@@ -896,6 +1028,12 @@ mod layout {
                 std::mem::offset_of!(MaterialParams, growth_period),
             ),
             ("sprouts", std::mem::offset_of!(MaterialParams, sprouts)),
+            ("emits", std::mem::offset_of!(MaterialParams, emits)),
+            (
+                "emit_period",
+                std::mem::offset_of!(MaterialParams, emit_period),
+            ),
+            ("burn_time", std::mem::offset_of!(MaterialParams, burn_time)),
         ];
         assert_eq!(actual, expected);
     }

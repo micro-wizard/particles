@@ -53,6 +53,10 @@ struct MaterialParams {
     heat_release: f32,
     growth_period: f32,
     sprouts: u32,
+    emits: u32,
+    emit_period: f32,
+    burn_time: f32,
+    _padding: u32,
 };
 
 struct Particle {
@@ -109,6 +113,7 @@ const FRICTIONLESS: f32 = 0.01;
 const NO_CONTACT: u32 = 0xFFFFFFFFu;
 const DEAD: u32 = 0xFFFFFFFFu;
 const NO_TRANSITION: u32 = 0xFFFFFFFFu;
+const VANISH: u32 = 0xFFFFFFFEu;
 const NO_PARENT: u32 = 0xFFFFFFFFu;
 const NO_ENTRY: u32 = 0xFFFFFFFFu;
 const NO_SLOT: u32 = 0xFFFFFFFFu;
@@ -579,7 +584,7 @@ fn drawn_after_moving_to(index: u32, position: vec2<f32>) -> vec2<f32> {
     return select(drawn, position, distance(position, drawn) > params.render_hysteresis);
 }
 
-fn move_grain(me: Grain, force: vec2<f32>) {
+fn move_grain(me: Grain, force: vec2<f32>) -> vec2<f32> {
     var velocity = speed_limited(me.entry.velocity + (force / me.mass) * params.dt);
     let unclamped = me.entry.position + velocity * params.dt;
     let position = clamp(unclamped, vec2<f32>(0.0), params.world);
@@ -588,6 +593,7 @@ fn move_grain(me: Grain, force: vec2<f32>) {
     particles[me.index].drawn = drawn_after_moving_to(me.index, position);
     particles[me.index].position = position;
     particles[me.index].velocity = velocity;
+    return position;
 }
 
 fn material_at_temperature(me: Grain, temperature: f32) -> u32 {
@@ -609,7 +615,22 @@ fn heat_exchanged_with_air(me: Grain, shelter: f32) -> f32 {
         * params.dt / max(me.material.heat_capacity, 1e-9);
 }
 
-fn heat_grain(me: Grain, around: Surroundings) {
+fn release_slot(index: u32) {
+    let top = atomicAdd(&allocator.free_count, 1u);
+    if top >= arrayLength(&allocator.free_stack) {
+        atomicSub(&allocator.free_count, 1u);
+        return;
+    }
+    allocator.free_stack[top] = index;
+}
+
+fn retire(index: u32, position: vec2<f32>) {
+    particles[index].material = DEAD;
+    atomicSub(&cell_counts[cell_index_of(position)], 1u);
+    release_slot(index);
+}
+
+fn heat_grain(me: Grain, around: Surroundings, position: vec2<f32>) {
     let temperature = clamp(
         me.entry.temperature
             + around.heat * params.dt / max(me.mass * me.material.heat_capacity, 1e-9)
@@ -619,15 +640,38 @@ fn heat_grain(me: Grain, around: Surroundings) {
         params.max_temperature,
     );
     particles[me.index].temperature = temperature;
-    particles[me.index].material = material_at_temperature(me, temperature);
+    let material = material_at_temperature(me, temperature);
+    if material == VANISH {
+        retire(me.index, position);
+        return;
+    }
+    particles[me.index].material = material;
+    if material != me.material_id && starts_or_stops_burning(me.material, material) {
+        particles[me.index].sprout = 0u;
+    }
 }
 
-fn tick_growth(me: Grain) {
-    if me.material.sprouts == NO_TRANSITION {
+fn starts_or_stops_burning(was: MaterialParams, becomes: u32) -> bool {
+    return was.emits != NO_TRANSITION || material_params(becomes).emits != NO_TRANSITION;
+}
+
+fn offshoot_period(me: Grain, sprout: u32) -> f32 {
+    if me.material.emits != NO_TRANSITION {
+        return me.material.emit_period;
+    }
+    if me.material.sprouts != NO_TRANSITION && (sprout & SHOOT_MASK) != 0u {
+        return me.material.growth_period;
+    }
+    return 0.0;
+}
+
+fn tick_offshoot_clock(me: Grain) {
+    if me.material.sprouts == NO_TRANSITION && me.material.emits == NO_TRANSITION {
         return;
     }
     let sprout = particles[me.index].sprout;
-    if (sprout & SHOOT_MASK) != 0u && !grown(sprout, me.material) {
+    let period = offshoot_period(me, sprout);
+    if period > 0.0 && !period_elapsed(sprout, period) {
         particles[me.index].sprout = sprout + TICK;
     }
 }
@@ -644,10 +688,11 @@ fn solve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     let around = sense_surroundings(me);
     end_contact_history(me.index, around.contacts_kept);
-    move_grain(me, around.force + weight_of(me) + stem_force_on(me) + air_drag_on(me, around.shelter));
+    let force = around.force + weight_of(me) + stem_force_on(me) + air_drag_on(me, around.shelter);
+    let position = move_grain(me, force);
     particles[me.index].packing = around.packing;
-    heat_grain(me, around);
-    tick_growth(me);
+    heat_grain(me, around, position);
+    tick_offshoot_clock(me);
 }
 
 const BEND_SCALE: f32 = 0.15;
@@ -920,8 +965,8 @@ const UPRIGHT: f32 = 0.35;
 const SETTLED_SPEED: f32 = 20.0;
 const FLUID_ROOM: f32 = 0.25;
 
-fn grown(sprout: u32, m: MaterialParams) -> bool {
-    return f32(sprout >> 16u) * params.dt >= m.growth_period;
+fn period_elapsed(sprout: u32, period: f32) -> bool {
+    return f32(sprout >> 16u) * params.dt >= period;
 }
 
 fn hash(x: u32) -> u32 {
@@ -971,7 +1016,7 @@ fn ready_to_grow(me: Particle) -> bool {
         return false;
     }
     let mine = material_params(me.material);
-    return mine.sprouts != NO_TRANSITION && grown(me.sprout, mine);
+    return mine.sprouts != NO_TRANSITION && period_elapsed(me.sprout, mine.growth_period);
 }
 
 struct Stem {
@@ -1054,20 +1099,18 @@ fn plan_offshoot(me: Particle, stem: vec2<f32>, seed: u32) -> Offshoot {
     );
 }
 
-@compute @workgroup_size(64)
-fn grow(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let index = global_id.x;
-    if index >= params.particle_count || !ready_to_grow(particles[index]) {
-        return;
-    }
-    let me = particles[index];
+fn random_seed(index: u32, position: vec2<f32>) -> u32 {
+    return index ^ bitcast<u32>(position.x) ^ (bitcast<u32>(position.y) << 1u);
+}
+
+fn grow_shoot(index: u32, me: Particle) {
     let stem = stem_of(me);
     if !stem.rooted && length(me.velocity) > SETTLED_SPEED {
         return;
     }
     let shoot = me.sprout & SHOOT_MASK;
     particles[index].sprout = shoot;
-    let seed = index ^ bitcast<u32>(me.position.x) ^ (bitcast<u32>(me.position.y) << 1u);
+    let seed = random_seed(index, me.position);
     let offshoot = plan_offshoot(me, stem.direction, seed);
     if site_outside_world(offshoot.site, offshoot.radius)
         || site_blocked(offshoot.site, offshoot.radius, index) {
@@ -1080,4 +1123,84 @@ fn grow(@builtin(global_invocation_id) global_id: vec3<u32>) {
     particles[slot] = offshoot_node(me, index, offshoot);
     clear_contact_history(slot);
     particles[index].sprout = sprout_left_after_growing(shoot, seed);
+}
+
+const FLAME_ATTEMPTS: u32 = 5u;
+const FLAME_SPREAD: f32 = 0.8;
+const FLAME_LIFT: f32 = 30.0;
+const FLAME_FLICKER: f32 = 15.0;
+
+fn ready_to_emit(me: Particle) -> bool {
+    if me.material == DEAD {
+        return false;
+    }
+    let mine = material_params(me.material);
+    return mine.emits != NO_TRANSITION && period_elapsed(me.sprout, mine.emit_period);
+}
+
+fn flame_site(me: Particle, radius: f32, attempt: u32, side: f32) -> vec2<f32> {
+    let lean = f32((attempt + 1u) / 2u) * FLAME_SPREAD * select(side, -side, attempt % 2u == 0u);
+    return me.position + rotate(UP, lean) * (me.radius + radius);
+}
+
+fn place_flame(me: Particle, site: vec2<f32>, radius: f32, seed: u32) {
+    let slot = claim_free_slot();
+    if slot == NO_SLOT {
+        return;
+    }
+    let fire = material_params(me.material).emits;
+    let flicker = (unit_random(seed + 2u) * 2.0 - 1.0) * FLAME_FLICKER;
+    particles[slot] = Particle(
+        site,
+        me.velocity + vec2<f32>(flicker, -FLAME_LIFT),
+        radius,
+        fire,
+        site,
+        0.0,
+        material_params(fire).default_temperature,
+        NO_PARENT,
+        NO_PARENT,
+        0u,
+        0.0,
+        vec2<f32>(0.0),
+    );
+    clear_contact_history(slot);
+}
+
+fn fuel_spent(me: Particle, mine: MaterialParams) -> bool {
+    return f32(me.sprout & SHOOT_MASK) * mine.emit_period >= mine.burn_time;
+}
+
+fn emit_flame(index: u32, me: Particle) {
+    let mine = material_params(me.material);
+    if fuel_spent(me, mine) && mine.becomes_above != NO_TRANSITION {
+        particles[index].material = mine.becomes_above;
+        return;
+    }
+    particles[index].sprout = (me.sprout & SHOOT_MASK) + 1u;
+    let seed = random_seed(index, me.position);
+    let fire = material_params(material_params(me.material).emits);
+    let radius = fire.radius * (0.9 + 0.2 * unit_random(seed));
+    let side = select(-1.0, 1.0, unit_random(seed + 1u) < 0.5);
+    for (var attempt = 0u; attempt < FLAME_ATTEMPTS; attempt++) {
+        let site = flame_site(me, radius, attempt, side);
+        if !site_outside_world(site, radius) && !site_blocked(site, radius, index) {
+            place_flame(me, site, radius, seed);
+            return;
+        }
+    }
+}
+
+@compute @workgroup_size(64)
+fn grow_and_emit(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let index = global_id.x;
+    if index >= params.particle_count {
+        return;
+    }
+    let me = particles[index];
+    if ready_to_grow(me) {
+        grow_shoot(index, me);
+    } else if ready_to_emit(me) {
+        emit_flame(index, me);
+    }
 }

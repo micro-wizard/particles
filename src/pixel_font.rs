@@ -13,6 +13,73 @@ const fn glyph(width: i32, rows: [u8; HEIGHT as usize]) -> Glyph {
 
 const SPACE: Glyph = glyph(3, [0; 7]);
 
+const POINT: Glyph = glyph(1, [0, 0, 0, 0, 0, 0, 0b1]);
+
+const MINUS: Glyph = glyph(3, [0, 0, 0, 0b111, 0, 0, 0]);
+
+const DIGITS: [Glyph; 10] = [
+    glyph(
+        5,
+        [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+    ),
+    glyph(
+        5,
+        [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+    ),
+    glyph(
+        5,
+        [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+        ],
+    ),
+    glyph(
+        5,
+        [
+            0b11111, 0b00010, 0b00100, 0b00010, 0b00001, 0b10001, 0b01110,
+        ],
+    ),
+    glyph(
+        5,
+        [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+    ),
+    glyph(
+        5,
+        [
+            0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
+        ],
+    ),
+    glyph(
+        5,
+        [
+            0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+        ],
+    ),
+    glyph(
+        5,
+        [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+    ),
+    glyph(
+        5,
+        [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+    ),
+    glyph(
+        5,
+        [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100,
+        ],
+    ),
+];
+
 fn glyph_for(c: char) -> &'static Glyph {
     const A: Glyph = glyph(
         5,
@@ -192,6 +259,9 @@ fn glyph_for(c: char) -> &'static Glyph {
         'X' => &X,
         'Y' => &Y,
         'Z' => &Z,
+        digit @ '0'..='9' => &DIGITS[digit as usize - '0' as usize],
+        '.' => &POINT,
+        '-' => &MINUS,
         _ => &SPACE,
     }
 }
@@ -290,7 +360,7 @@ mod tests {
 
     #[test]
     fn every_glyph_fits_its_width() {
-        for c in 'A'..='Z' {
+        for c in ('A'..='Z').chain('0'..='9').chain(['.', '-']) {
             let glyph = glyph_for(c);
             assert!(glyph.rows.iter().all(|row| row >> glyph.width == 0), "{c}");
         }

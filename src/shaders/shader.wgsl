@@ -88,6 +88,10 @@ struct MaterialParams {
     heat_release: f32,
     growth_period: f32,
     sprouts: u32,
+    emits: u32,
+    emit_period: f32,
+    burn_time: f32,
+    _padding: u32,
 };
 @group(0) @binding(3) var<storage, read> materials: array<MaterialParams>;
 
