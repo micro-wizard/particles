@@ -3,7 +3,7 @@ use crate::{
     config, ecs,
     gpu_context::GpuContext,
     gpu_timing::Span,
-    materials::{Globals, MaterialParams, MATERIAL_COUNT},
+    materials::{Globals, MaterialParams, MATERIAL_COUNT, NO_TRANSITION},
 };
 
 pub struct Model {
@@ -16,6 +16,11 @@ impl Model {
         Self {
             solver: Solver::new(gpu_context, &particles),
         }
+    }
+
+    pub fn reset(&mut self, gpu_context: &GpuContext<'_>) {
+        let particles = ecs::seed_world(config::PARTICLE_COUNT);
+        self.solver.reset(gpu_context, &particles);
     }
 
     pub fn update(&mut self, dt: f32, gpu_context: &GpuContext<'_>) {
@@ -67,6 +72,10 @@ impl Model {
         self.solver.live_count()
     }
 
+    pub fn placed_count(&self) -> u32 {
+        self.solver.placed_count()
+    }
+
     pub fn paint(&mut self, centre: [f32; 2], material: u32, radius: f32) {
         let spacing = self.solver.materials()[material as usize].rest_spacing();
         for point in ecs::brush_points(centre, radius, spacing) {
@@ -76,6 +85,10 @@ impl Model {
 
     pub fn heat(&mut self, centre: [f32; 2], radius: f32, delta: f32) {
         self.solver.heat(centre, radius, delta);
+    }
+
+    pub fn erase(&mut self, centre: [f32; 2], radius: f32) {
+        self.solver.erase(centre, radius);
     }
 
     pub fn blow(&mut self, centre: [f32; 2], radius: f32, velocity: [f32; 2], outflow: f32) {
@@ -108,7 +121,11 @@ impl Model {
             material,
 
             temperature: params.default_temperature,
-            _padding: 0.0,
+            budget: if params.sprouts == NO_TRANSITION {
+                0
+            } else {
+                (config::SHOOT_LENGTH as f32 * ecs::random_range(0.6, 1.0)) as u32
+            },
         });
     }
 }

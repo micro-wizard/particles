@@ -455,7 +455,7 @@ impl<'a> View<'a> {
     }
 
     pub fn window(&self) -> &Window {
-        &self.window
+        self.window
     }
 
     pub fn resize(
@@ -605,9 +605,10 @@ impl<'a> View<'a> {
             &gpu_context.queue,
             &mut command_encoder,
             &texture_view,
-            self.config.width,
-            self.config.height,
-            scale,
+            &egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [self.config.width, self.config.height],
+                pixels_per_point: scale,
+            },
         );
 
         gpu_context

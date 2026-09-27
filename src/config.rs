@@ -27,3 +27,8 @@ pub(crate) const MAX_FREQ_N: f32 = 0.170 / SUBSTEP;
 pub(crate) const MAX_FREQ_T: f32 = 0.100 / SUBSTEP;
 pub(crate) const MAX_FRAME_TIME: f32 = 1.0 / 30.0;
 pub(crate) const MAX_SUBSTEPS: u32 = (MAX_FRAME_TIME / SUBSTEP) as u32 + 1;
+pub(crate) const SHOOT_LENGTH: u32 = 48;
+const _: () = assert!(
+    SHOOT_LENGTH < 0x8000,
+    "a shoot's length must fit below SIDE_SHOOT in compute.wgsl's `sprout`",
+);

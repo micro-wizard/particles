@@ -8,16 +8,18 @@ use std::sync::{
 pub enum Span {
     Scan,
     Scatter,
+    Plants,
     Solve,
 }
 
 impl Span {
-    pub const ALL: [Span; 3] = [Span::Scan, Span::Scatter, Span::Solve];
+    pub const ALL: [Span; 4] = [Span::Scan, Span::Scatter, Span::Plants, Span::Solve];
 
     pub fn label(self) -> &'static str {
         match self {
             Span::Scan => "scan_cells",
             Span::Scatter => "scatter_particles",
+            Span::Plants => "plant_forces",
             Span::Solve => "solve",
         }
     }
