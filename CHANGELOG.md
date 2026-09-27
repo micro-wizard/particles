@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.1.2
+- Changes to menu layout to properly render on various canvas sizes.
+
 ## 0.1.1
 - An eraser brush, and a reset button that clears the world.
 - An info button that opens this changelog.

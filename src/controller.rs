@@ -104,6 +104,7 @@ pub struct Controller<'a> {
     touch: Finger,
     aim: Aim,
     fullscreen_available: bool,
+    natural_height: f32,
 }
 
 impl<'a> Controller<'a> {
@@ -131,6 +132,7 @@ impl<'a> Controller<'a> {
             touch: Finger::default(),
             aim: Aim::new(),
             fullscreen_available: fullscreen_available(),
+            natural_height: 0.0,
         }
     }
 
@@ -274,6 +276,7 @@ impl<'a> Controller<'a> {
                 }
                 self.view
                     .set_menu_height(self.overlay.menu_height() * scale, &self.gpu_context);
+                self.publish_natural_height(scale);
                 if self.overlay.take_fullscreen_request() {
                     self.toggle_fullscreen();
                 }
@@ -322,6 +325,17 @@ impl<'a> Controller<'a> {
         factor * overlay::zoom_for(self.view.size.width as f32 / factor)
     }
 
+    fn publish_natural_height(&mut self, scale: f32) {
+        let world =
+            self.view.size.width as f32 * config::PIXEL_HEIGHT as f32 / config::PIXEL_WIDTH as f32;
+        let physical = world + self.overlay.menu_height() * scale;
+        let height = (physical / self.view.window().scale_factor() as f32).ceil();
+        if height != self.natural_height {
+            self.natural_height = height;
+            set_natural_height(height);
+        }
+    }
+
     fn toggle_fullscreen(&self) {
         let window = self.view.window();
         window.set_fullscreen(match window.fullscreen() {
@@ -359,6 +373,19 @@ fn fullscreen_available() -> bool {
 fn fullscreen_available() -> bool {
     true
 }
+
+#[cfg(target_arch = "wasm32")]
+fn set_natural_height(height: f32) {
+    if let Some(root) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.document_element())
+    {
+        let _ = root.set_attribute("data-natural-height", &height.to_string());
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_natural_height(_height: f32) {}
 
 pub async fn run() {
     let event_loop = EventLoop::new().expect("Failed to create event loop");

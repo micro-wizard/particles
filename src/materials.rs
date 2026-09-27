@@ -43,8 +43,6 @@ unsafe impl bytemuck::Pod for MaterialParams {}
 #[derive(Copy, Clone, Debug)]
 pub struct Material {
     pub name: &'static str,
-    /// Whether the brush menu offers it; growth and burning products are left
-    /// to arise on their own.
     pub palette: bool,
     pub params: MaterialParams,
 }

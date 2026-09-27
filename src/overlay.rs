@@ -372,11 +372,11 @@ impl Overlay {
             self.stats.sim_speed(),
         );
 
-        let panel = egui::Rect::from_min_max(
-            egui::pos2(0.0, (world[1] + world[3]) / scale),
-            screen.to_pos2(),
-        );
         self.menu_height = menu_height_for(screen.x, pixel_font::pixel_size(MENU_PIXEL, scale));
+        let panel = egui::Rect::from_min_size(
+            egui::pos2(0.0, (world[1] + world[3]) / scale),
+            egui::vec2(screen.x, self.menu_height),
+        );
         let colours = self.materials.map(|m| m.colour);
         let materials = &mut self.materials;
         let globals = &mut self.globals;
@@ -851,12 +851,10 @@ const TOOLS: [(BrushMode, &str, egui::Color32, &str); 6] = [
 #[derive(Copy, Clone)]
 enum Piece {
     Tools,
-
     Swatch(usize),
-
     Controls,
-
-    World,
+    Motion,
+    Weather,
 }
 
 impl Piece {
@@ -873,13 +871,8 @@ impl Piece {
             Piece::Controls => {
                 slider_label_width() + NAME_GAP + SLIDER_WIDTH + NAME_GAP + slider_value_width()
             }
-            Piece::World => {
-                WORLD_SLIDERS
-                    .iter()
-                    .map(|(slider, _)| slider.width())
-                    .sum::<i32>()
-                    + (WORLD_SLIDERS.len() as i32 - 1) * ITEM_GAP
-            }
+            Piece::Motion => WORLD_SLIDERS[0].0.width().max(SIM_SPEED.width()),
+            Piece::Weather => WORLD_SLIDERS[1].0.width() + ITEM_GAP + WORLD_SLIDERS[2].0.width(),
         }
     }
 
@@ -888,7 +881,7 @@ impl Piece {
             Piece::Tools => 0,
             Piece::Swatch(_) => 1,
             Piece::Controls => 2,
-            Piece::World => 3,
+            Piece::Motion | Piece::Weather => 3,
         };
         if group(self) == group(previous) {
             ITEM_GAP
@@ -905,31 +898,59 @@ fn menu_rows(width: i32) -> Vec<Vec<Piece>> {
                 .filter(|&id| MATERIALS[id].palette)
                 .map(Piece::Swatch),
         )
-        .chain([Piece::Controls, Piece::World]);
+        .chain([Piece::Controls, Piece::Motion, Piece::Weather]);
     let mut rows: Vec<Vec<Piece>> = Vec::new();
+    let world =
+        Piece::Motion.width() + Piece::Weather.gap_after(Piece::Motion) + Piece::Weather.width();
+    let whole = if world <= width {
+        world
+    } else {
+        Piece::Motion.width()
+    };
     for piece in pieces {
         let limit = width - reserved_for_fullscreen(rows.len().saturating_sub(1));
+        let needs = match piece {
+            Piece::Motion => whole,
+            _ => piece.width(),
+        };
         match rows.last_mut() {
-            Some(row) if fits_in(row, piece, limit) => row.push(piece),
+            Some(row) if fits_in(row, piece, needs, limit) => row.push(piece),
             _ => rows.push(vec![piece]),
         }
     }
-    leave_room_for_last_row_icons(&mut rows, width);
+    make_room_for_icons(&mut rows, width);
     rows
 }
 
-fn leave_room_for_last_row_icons(rows: &mut Vec<Vec<Piece>>, width: i32) {
-    let last = rows.len() - 1;
-    let limit = width - reserved_for_corners(last, rows.len());
-    if row_width(&rows[last]) > limit && rows[last].len() > 1 {
-        let piece = rows[last].pop().expect("the last row has a piece to spare");
-        rows.push(vec![piece]);
+fn make_room_for_icons(rows: &mut Vec<Vec<Piece>>, width: i32) {
+    if icon_row(rows, width).is_some() {
+        return;
     }
+    let last = rows.len() - 1;
+    let moving = match rows[last][..] {
+        [.., Piece::Motion, Piece::Weather] => 2,
+        _ => 1,
+    };
+    if rows[last].len() > moving {
+        let split = rows[last].len() - moving;
+        let pieces = rows[last].split_off(split);
+        rows.push(pieces);
+        if icon_row(rows, width).is_some() {
+            return;
+        }
+    }
+    rows.push(Vec::new());
 }
 
-fn fits_in(row: &[Piece], piece: Piece, limit: i32) -> bool {
+fn icon_row(rows: &[Vec<Piece>], width: i32) -> Option<usize> {
+    (0..rows.len())
+        .rev()
+        .find(|&i| row_width(&rows[i]) <= width - reserved_for_corners(i, i))
+}
+
+fn fits_in(row: &[Piece], piece: Piece, needs: i32, limit: i32) -> bool {
     let previous = row[row.len() - 1];
-    row_width(row) + piece.gap_after(previous) + piece.width() <= limit
+    row_width(row) + piece.gap_after(previous) + needs <= limit
 }
 
 fn reserved_for_fullscreen(row_index: usize) -> i32 {
@@ -940,8 +961,8 @@ fn reserved_for_fullscreen(row_index: usize) -> i32 {
     }
 }
 
-fn corner_reserves(row_index: usize, row_count: usize) -> [i32; 2] {
-    if row_index + 1 < row_count {
+fn corner_reserves(row_index: usize, icon_row: usize) -> [i32; 2] {
+    if row_index != icon_row {
         return [0, reserved_for_fullscreen(row_index)];
     }
     [
@@ -950,8 +971,8 @@ fn corner_reserves(row_index: usize, row_count: usize) -> [i32; 2] {
     ]
 }
 
-fn reserved_for_corners(row_index: usize, row_count: usize) -> i32 {
-    let [left, right] = corner_reserves(row_index, row_count);
+fn reserved_for_corners(row_index: usize, icon_row: usize) -> i32 {
+    let [left, right] = corner_reserves(row_index, icon_row);
     left + right
 }
 
@@ -1025,10 +1046,12 @@ fn menu_contents(ui: &mut egui::Ui, panel: egui::Rect, scale: f32, state: &mut M
     grid.fill(ui.painter(), 0, 0, columns + 1, 1, MENU_EDGE);
 
     let rows = menu_rows(columns - 2 * MENU_PAD);
+    let icons =
+        icon_row(&rows, columns - 2 * MENU_PAD).expect("menu_rows leaves room for the icons");
     let rows_height = rows.len() as i32 * (ROW_HEIGHT + ROW_GAP) - ROW_GAP;
     let first_top = ((height - rows_height) / 2).max(MENU_PAD);
     for (i, row) in rows.iter().enumerate() {
-        let [left, right] = corner_reserves(i, rows.len());
+        let [left, right] = corner_reserves(i, icons);
         let room = columns - left - right;
         let top = first_top + i as i32 * (ROW_HEIGHT + ROW_GAP);
         menu_row(
@@ -1039,12 +1062,11 @@ fn menu_contents(ui: &mut egui::Ui, panel: egui::Rect, scale: f32, state: &mut M
             state,
         );
     }
-    let last_top = first_top + (rows.len() as i32 - 1) * (ROW_HEIGHT + ROW_GAP);
     let corners = Corners {
         right: columns - MENU_PAD - FULLSCREEN.width,
         first_top,
-        last_top,
-        single_row: rows.len() == 1,
+        icons_top: first_top + icons as i32 * (ROW_HEIGHT + ROW_GAP),
+        icons_on_first_row: icons == 0,
     };
     corner_buttons(ui, grid, corners, state);
 }
@@ -1052,8 +1074,8 @@ fn menu_contents(ui: &mut egui::Ui, panel: egui::Rect, scale: f32, state: &mut M
 struct Corners {
     right: i32,
     first_top: i32,
-    last_top: i32,
-    single_row: bool,
+    icons_top: i32,
+    icons_on_first_row: bool,
 }
 
 fn corner_buttons(
@@ -1062,7 +1084,7 @@ fn corner_buttons(
     corners: Corners,
     state: &mut MenuState<'_>,
 ) {
-    let beside_fullscreen = if corners.single_row {
+    let beside_fullscreen = if corners.icons_on_first_row {
         FULLSCREEN_RESERVE
     } else {
         0
@@ -1070,10 +1092,10 @@ fn corner_buttons(
     reset_button(
         ui,
         grid,
-        [MENU_PAD, corners.last_top],
+        [MENU_PAD, corners.icons_top],
         state.reset_requested,
     );
-    let info_at = [corners.right - beside_fullscreen, corners.last_top];
+    let info_at = [corners.right - beside_fullscreen, corners.icons_top];
     info_button(ui, grid, info_at, state.changelog_open);
     let Some(fullscreen) = state.fullscreen else {
         return;
@@ -1112,10 +1134,22 @@ fn menu_piece(
         Piece::Tools => tools(ui, grid, x, y, state.brush),
         Piece::Swatch(id) => swatch(ui, grid, x, y, state.brush, id, state.colours[id]),
         Piece::Controls => controls(ui, grid, x, y, state.brush),
-        Piece::World => {
-            world_sliders(ui, grid, [x, y], state.world);
+        Piece::Motion => {
+            world_slider(ui, grid, [x, y], 0, state.world);
+            speed_slider(
+                ui,
+                grid,
+                [x, y + ROW_HEIGHT - pixel_font::HEIGHT],
+                state.time_scale,
+            );
+        }
+        Piece::Weather => {
+            world_slider(ui, grid, [x, y], 1, state.world);
+            let wind_x = x + WORLD_SLIDERS[1].0.width() + ITEM_GAP;
+            world_slider(ui, grid, [wind_x, y], 2, state.world);
             let second = y + ROW_HEIGHT - pixel_font::HEIGHT;
-            clock(ui, grid, [x, second], state.time_scale, &state.readout);
+            let text = state.readout.text();
+            grid.text(ui.painter(), x + readout_indent(), second, &text, TEXT);
         }
     }
 }
@@ -1248,47 +1282,39 @@ fn controls(ui: &mut egui::Ui, grid: pixel_font::Grid, x: i32, y: i32, brush: &m
     menu_slider(ui, grid, second, slider, setting, enabled.then_some(accent));
 }
 
-fn world_sliders(ui: &mut egui::Ui, grid: pixel_font::Grid, at: [i32; 2], world: &mut Globals) {
-    let [x, y] = at;
-    let defaults = Globals::default();
-    let settings = [
-        Setting {
-            value: &mut world.gravity,
-            default: defaults.gravity,
-        },
-        Setting {
-            value: &mut world.rest_temperature,
-            default: defaults.rest_temperature,
-        },
-        Setting {
-            value: &mut world.wind,
-            default: defaults.wind,
-        },
-    ];
-    let mut left = x;
-    for ((slider, accent), setting) in WORLD_SLIDERS.iter().zip(settings) {
-        let label_width = pixel_font::width(slider.label);
-        let place = SliderPlace {
-            x: left,
-            y,
-            label_width,
-        };
-        menu_slider(ui, grid, place, slider, setting, Some(*accent));
-        left += slider.width() + ITEM_GAP;
-    }
-}
-
-fn clock(
+fn world_slider(
     ui: &mut egui::Ui,
     grid: pixel_font::Grid,
     at: [i32; 2],
-    time_scale: &mut f32,
-    readout: &Readout,
+    index: usize,
+    world: &mut Globals,
 ) {
-    let [x, y] = at;
+    let defaults = Globals::default();
+    let (value, default) = match index {
+        0 => (&mut world.gravity, defaults.gravity),
+        1 => (&mut world.rest_temperature, defaults.rest_temperature),
+        _ => (&mut world.wind, defaults.wind),
+    };
+    let (slider, accent) = &WORLD_SLIDERS[index];
     let place = SliderPlace {
-        x,
-        y,
+        x: at[0],
+        y: at[1],
+        label_width: pixel_font::width(slider.label),
+    };
+    menu_slider(
+        ui,
+        grid,
+        place,
+        slider,
+        Setting { value, default },
+        Some(*accent),
+    );
+}
+
+fn speed_slider(ui: &mut egui::Ui, grid: pixel_font::Grid, at: [i32; 2], time_scale: &mut f32) {
+    let place = SliderPlace {
+        x: at[0],
+        y: at[1],
         label_width: pixel_font::width(WORLD_SLIDERS[0].0.label),
     };
     let speed = Setting {
@@ -1296,16 +1322,15 @@ fn clock(
         default: REAL_TIME,
     };
     menu_slider(ui, grid, place, &SIM_SPEED, speed, Some(TIME_ACCENT));
-    grid.text(ui.painter(), x + readout_offset(), y, &readout.text(), TEXT);
 }
 
-fn readout_offset() -> i32 {
-    pixel_font::width(WORLD_SLIDERS[0].0.label)
+fn readout_indent() -> i32 {
+    let speed_end = pixel_font::width(WORLD_SLIDERS[0].0.label)
         + NAME_GAP
         + SLIDER_WIDTH
         + NAME_GAP
-        + SIM_SPEED.value_width()
-        + ITEM_GAP
+        + SIM_SPEED.value_width();
+    (speed_end - Piece::Motion.width()).max(0)
 }
 
 #[derive(Copy, Clone)]
@@ -1810,11 +1835,11 @@ mod tests {
 
     #[test]
     fn the_longest_readout_fits_under_the_world_sliders() {
-        let line = readout_offset() + pixel_font::width(&longest_readout().text());
+        let line = readout_indent() + pixel_font::width(&longest_readout().text());
         assert!(
-            line <= Piece::World.width(),
+            line <= Piece::Weather.width(),
             "{line} > {}",
-            Piece::World.width()
+            Piece::Weather.width()
         );
     }
 
@@ -1861,15 +1886,30 @@ mod tests {
 
     #[test]
     fn every_row_leaves_room_for_its_corner_icons() {
-        for width in (404..=1500).step_by(7) {
+        for width in 238..=1500 {
             let rows = menu_rows(width);
+            let icons = icon_row(&rows, width).expect("the icons have a row");
             for (i, row) in rows.iter().enumerate() {
-                let limit = width - reserved_for_corners(i, rows.len());
+                let limit = width - reserved_for_corners(i, icons);
                 assert!(
                     row_width(row) <= limit,
                     "at width {width}, row {i} is {} wide, over its {limit}",
                     row_width(row),
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn the_world_columns_share_a_row_whenever_one_fits_them() {
+        let both = Piece::Motion.width() + ITEM_GAP + Piece::Weather.width();
+        for width in 238..=1500 {
+            let rows = menu_rows(width);
+            let row_of = |want: fn(&Piece) -> bool| rows.iter().position(|r| r.iter().any(want));
+            let motion = row_of(|p| matches!(p, Piece::Motion));
+            let weather = row_of(|p| matches!(p, Piece::Weather));
+            if both <= width {
+                assert_eq!(motion, weather, "at width {width} the world columns split");
             }
         }
     }

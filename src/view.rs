@@ -30,7 +30,7 @@ impl Placement {
         Self {
             offset: [
                 ((surface[0] - pixels[0] * scale) * 0.5).max(0.0).floor(),
-                0.0,
+                ((room - pixels[1] * scale) * 0.5).max(0.0).floor(),
             ],
             scale,
             _padding: 0.0,
