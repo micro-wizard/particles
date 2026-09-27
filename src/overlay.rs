@@ -171,23 +171,17 @@ pub struct Overlay {
     events: Vec<egui::Event>,
     modifiers: egui::Modifiers,
     pointer: egui::Pos2,
-
     captured: bool,
-
     pub show_developer: bool,
     pub stats: Stats,
     pub materials: [MaterialParams; MATERIAL_COUNT as usize],
     pub globals: Globals,
-
     selected: usize,
     brush: Brush,
-
     time_passes: bool,
-
     time_scale: f32,
-
     fullscreen_requested: bool,
-
+    changelog_open: bool,
     menu_height: f32,
     paint_jobs: Vec<egui::ClippedPrimitive>,
     textures_delta: egui::TexturesDelta,
@@ -217,6 +211,7 @@ impl Overlay {
             time_passes: false,
             time_scale: REAL_TIME,
             fullscreen_requested: false,
+            changelog_open: false,
             menu_height: 0.0,
             paint_jobs: Vec::new(),
             textures_delta: egui::TexturesDelta::default(),
@@ -388,6 +383,7 @@ impl Overlay {
         let show_developer = self.show_developer;
         let time_scale = &mut self.time_scale;
         let readout = self.stats.readout(particle_count);
+        let changelog_open = &mut self.changelog_open;
 
         let output = self.context.run(raw, |ctx| {
             let state = MenuState {
@@ -397,11 +393,12 @@ impl Overlay {
                 world: &mut *globals,
                 time_scale: &mut *time_scale,
                 readout,
+                changelog_open: &mut *changelog_open,
             };
             if menu(ctx, panel, scale, state) {
                 *fullscreen_requested = true;
             }
-
+            changelog_window(ctx, changelog_open, panel.min.y);
 
             let (colour, arrow) = match brush.mode {
                 BrushMode::Blow => (AIR_ACCENT, Some(blow_direction)),
@@ -905,7 +902,17 @@ fn menu_rows(width: i32) -> Vec<Vec<Piece>> {
             _ => rows.push(vec![piece]),
         }
     }
+    leave_room_for_info(&mut rows, width);
     rows
+}
+
+fn leave_room_for_info(rows: &mut Vec<Vec<Piece>>, width: i32) {
+    let last = rows.len() - 1;
+    let limit = width - reserved_for_corners(last, rows.len());
+    if row_width(&rows[last]) > limit && rows[last].len() > 1 {
+        let piece = rows[last].pop().expect("the last row has a piece to spare");
+        rows.push(vec![piece]);
+    }
 }
 
 fn fits_in(row: &[Piece], piece: Piece, limit: i32) -> bool {
@@ -919,6 +926,15 @@ fn reserved_for_fullscreen(row_index: usize) -> i32 {
     } else {
         0
     }
+}
+
+fn reserved_for_corners(row_index: usize, row_count: usize) -> i32 {
+    let info = if row_index + 1 == row_count {
+        INFO_RESERVE
+    } else {
+        0
+    };
+    reserved_for_fullscreen(row_index) + info
 }
 
 fn row_width(row: &[Piece]) -> i32 {
@@ -970,6 +986,7 @@ struct MenuState<'a> {
     world: &'a mut Globals,
     time_scale: &'a mut f32,
     readout: Readout,
+    changelog_open: &'a mut bool,
 }
 
 fn menu(ctx: &egui::Context, panel: egui::Rect, scale: f32, mut state: MenuState<'_>) -> bool {
@@ -997,14 +1014,26 @@ fn menu_contents(
     let rows_height = rows.len() as i32 * (ROW_HEIGHT + ROW_GAP) - ROW_GAP;
     let first_top = ((height - rows_height) / 2).max(MENU_PAD);
     for (i, row) in rows.iter().enumerate() {
-        let room = columns - reserved_for_fullscreen(i);
+        let room = columns - reserved_for_corners(i, rows.len());
         let top = first_top + i as i32 * (ROW_HEIGHT + ROW_GAP);
         menu_row(ui, grid, row, [(room - row_width(row)) / 2, top], state);
     }
     let corner = columns - MENU_PAD - FULLSCREEN.width;
+    let last_top = first_top + (rows.len() as i32 - 1) * (ROW_HEIGHT + ROW_GAP);
+    let beside_fullscreen = if rows.len() == 1 {
+        FULLSCREEN_RESERVE
+    } else {
+        0
+    };
+    info_button(
+        ui,
+        grid,
+        [corner - beside_fullscreen, last_top],
+        state.changelog_open,
+    );
     state
         .fullscreen
-        .is_some_and(|fullscreen| fullscreen_toggle(ui, grid, corner, first_top, fullscreen))
+        .is_some_and(|fullscreen| fullscreen_toggle(ui, grid, [corner, first_top], fullscreen))
 }
 
 fn menu_row(
@@ -1513,6 +1542,14 @@ fn brush_outline(
 }
 
 const FULLSCREEN_RESERVE: i32 = GROUP_GAP + FULLSCREEN.width;
+const INFO_RESERVE: i32 = GROUP_GAP + INFO.width;
+
+const INFO: pixel_font::Glyph = pixel_font::Glyph {
+    width: 7,
+    rows: [
+        0b0011100, 0b0100010, 0b1001001, 0b1000001, 0b1001001, 0b0101010, 0b0011100,
+    ],
+};
 
 const FULLSCREEN: pixel_font::Glyph = pixel_font::Glyph {
     width: 7,
@@ -1526,8 +1563,7 @@ const EXIT_FULLSCREEN: pixel_font::Glyph = pixel_font::Glyph {
 fn fullscreen_toggle(
     ui: &mut egui::Ui,
     grid: pixel_font::Grid,
-    x: i32,
-    y: i32,
+    at: [i32; 2],
     fullscreen: bool,
 ) -> bool {
     let (label, icon) = if fullscreen {
@@ -1535,19 +1571,65 @@ fn fullscreen_toggle(
     } else {
         ("Fullscreen", &FULLSCREEN)
     };
+    icon_button(ui, grid, at, icon, label, false)
+}
+
+fn info_button(ui: &mut egui::Ui, grid: pixel_font::Grid, at: [i32; 2], open: &mut bool) {
+    if icon_button(ui, grid, at, &INFO, "Changelog", *open) {
+        *open = !*open;
+    }
+}
+
+fn icon_button(
+    ui: &mut egui::Ui,
+    grid: pixel_font::Grid,
+    at: [i32; 2],
+    icon: &pixel_font::Glyph,
+    label: &str,
+    chosen: bool,
+) -> bool {
+    let [x, y] = at;
     let rect = grid.rect(x - ITEM_GAP / 2, y, icon.width + ITEM_GAP, ROW_HEIGHT);
     let response = ui.allocate_rect(rect, egui::Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
     });
-    grid.bitmap(
-        ui.painter(),
-        x,
-        y + TEXT_TOP,
-        icon,
-        label_colour(&response, None),
-    );
+    let colour = label_colour(&response, chosen.then_some(TEXT_CHOSEN));
+    grid.bitmap(ui.painter(), x, y + TEXT_TOP, icon, colour);
     response.on_hover_text(label).clicked()
+}
+
+const CHANGELOG: &str = include_str!("../CHANGELOG.md");
+const CHANGELOG_MARGIN: f32 = 8.0;
+
+fn changelog_window(ctx: &egui::Context, open: &mut bool, menu_top: f32) {
+    let above_menu = ctx.screen_rect().bottom() - menu_top + CHANGELOG_MARGIN;
+    let frame = egui::Frame::window(&ctx.style())
+        .fill(MENU_FILL)
+        .stroke(egui::Stroke::new(1.0, MENU_EDGE));
+    egui::Window::new("Changelog")
+        .open(open)
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-CHANGELOG_MARGIN, -above_menu])
+        .default_width(300.0)
+        .collapsible(false)
+        .resizable(false)
+        .frame(frame)
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(260.0)
+                .show(ui, show_changelog);
+        });
+}
+
+fn show_changelog(ui: &mut egui::Ui) {
+    for line in CHANGELOG.lines() {
+        if let Some(date) = line.strip_prefix("## ") {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(date).strong());
+        } else if let Some(change) = line.strip_prefix("- ") {
+            ui.label(format!("• {change}"));
+        }
+    }
 }
 
 fn stability_readout(ui: &mut egui::Ui, m: &MaterialParams) {
@@ -1714,6 +1796,32 @@ mod tests {
                 slider.label,
             );
         }
+    }
+
+    #[test]
+    fn every_row_leaves_room_for_its_corner_icons() {
+        for width in (404..=1500).step_by(7) {
+            let rows = menu_rows(width);
+            for (i, row) in rows.iter().enumerate() {
+                let limit = width - reserved_for_corners(i, rows.len());
+                assert!(
+                    row_width(row) <= limit,
+                    "at width {width}, row {i} is {} wide, over its {limit}",
+                    row_width(row),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_changelog_is_dates_and_changes() {
+        let known =
+            |line: &str| line.is_empty() || ["# ", "## ", "- "].iter().any(|p| line.starts_with(p));
+        for line in CHANGELOG.lines() {
+            assert!(known(line), "the changelog window would skip {line:?}");
+        }
+        assert!(CHANGELOG.lines().any(|line| line.starts_with("## ")));
+        assert!(CHANGELOG.lines().any(|line| line.starts_with("- ")));
     }
 
     #[test]
