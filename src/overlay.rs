@@ -132,13 +132,11 @@ impl Stats {
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum BrushMode {
     Paint,
-
     Heat,
     Cool,
-
     Blow,
-
     Burst,
+    Erase,
 }
 
 struct Brush {
@@ -181,6 +179,7 @@ pub struct Overlay {
     time_passes: bool,
     time_scale: f32,
     fullscreen_requested: bool,
+    reset_requested: bool,
     changelog_open: bool,
     menu_height: f32,
     paint_jobs: Vec<egui::ClippedPrimitive>,
@@ -211,6 +210,7 @@ impl Overlay {
             time_passes: false,
             time_scale: REAL_TIME,
             fullscreen_requested: false,
+            reset_requested: false,
             changelog_open: false,
             menu_height: 0.0,
             paint_jobs: Vec::new(),
@@ -310,7 +310,7 @@ impl Overlay {
 
     pub fn brush_heat_rate(&self) -> f32 {
         match self.brush.mode {
-            BrushMode::Paint | BrushMode::Blow | BrushMode::Burst => 0.0,
+            BrushMode::Paint | BrushMode::Blow | BrushMode::Burst | BrushMode::Erase => 0.0,
             BrushMode::Heat => self.brush.heat_rate,
             BrushMode::Cool => -self.brush.heat_rate,
         }
@@ -342,6 +342,10 @@ impl Overlay {
 
     pub fn take_fullscreen_request(&mut self) -> bool {
         std::mem::take(&mut self.fullscreen_requested)
+    }
+
+    pub fn take_reset_request(&mut self) -> bool {
+        std::mem::take(&mut self.reset_requested)
     }
 
     pub fn run(
@@ -384,6 +388,7 @@ impl Overlay {
         let time_scale = &mut self.time_scale;
         let readout = self.stats.readout(particle_count);
         let changelog_open = &mut self.changelog_open;
+        let reset_requested = &mut self.reset_requested;
 
         let output = self.context.run(raw, |ctx| {
             let state = MenuState {
@@ -394,10 +399,10 @@ impl Overlay {
                 time_scale: &mut *time_scale,
                 readout,
                 changelog_open: &mut *changelog_open,
+                fullscreen_requested: &mut *fullscreen_requested,
+                reset_requested: &mut *reset_requested,
             };
-            if menu(ctx, panel, scale, state) {
-                *fullscreen_requested = true;
-            }
+            menu(ctx, panel, scale, state);
             changelog_window(ctx, changelog_open, panel.min.y);
 
             let (colour, arrow) = match brush.mode {
@@ -655,6 +660,7 @@ const PAINT_ACCENT: egui::Color32 = hex(0xfabd2f);
 const HEAT_ACCENT: egui::Color32 = hex(0xfe8019);
 const COOL_ACCENT: egui::Color32 = hex(0x83a598);
 const AIR_ACCENT: egui::Color32 = hex(0x8ec07c);
+const ERASE_ACCENT: egui::Color32 = hex(0xfb4934);
 
 struct MenuSlider {
     label: &'static str,
@@ -799,7 +805,7 @@ const WORLD_SLIDERS: [(MenuSlider, egui::Color32); 3] = [
     ),
 ];
 
-const TOOLS: [(BrushMode, &str, egui::Color32, &str); 5] = [
+const TOOLS: [(BrushMode, &str, egui::Color32, &str); 6] = [
     (
         BrushMode::Paint,
         "Paint",
@@ -833,6 +839,12 @@ const TOOLS: [(BrushMode, &str, egui::Color32, &str); 5] = [
         AIR_ACCENT,
         "Air rushes out of the brush in every direction for as long as you hold it: \
          a click is a puff, holding digs a crater.",
+    ),
+    (
+        BrushMode::Erase,
+        "Erase",
+        ERASE_ACCENT,
+        "Hold the left mouse button in the world to remove whatever the brush touches.",
     ),
 ];
 
@@ -902,11 +914,11 @@ fn menu_rows(width: i32) -> Vec<Vec<Piece>> {
             _ => rows.push(vec![piece]),
         }
     }
-    leave_room_for_info(&mut rows, width);
+    leave_room_for_last_row_icons(&mut rows, width);
     rows
 }
 
-fn leave_room_for_info(rows: &mut Vec<Vec<Piece>>, width: i32) {
+fn leave_room_for_last_row_icons(rows: &mut Vec<Vec<Piece>>, width: i32) {
     let last = rows.len() - 1;
     let limit = width - reserved_for_corners(last, rows.len());
     if row_width(&rows[last]) > limit && rows[last].len() > 1 {
@@ -928,13 +940,19 @@ fn reserved_for_fullscreen(row_index: usize) -> i32 {
     }
 }
 
+fn corner_reserves(row_index: usize, row_count: usize) -> [i32; 2] {
+    if row_index + 1 < row_count {
+        return [0, reserved_for_fullscreen(row_index)];
+    }
+    [
+        RESET_RESERVE,
+        reserved_for_fullscreen(row_index) + INFO_RESERVE,
+    ]
+}
+
 fn reserved_for_corners(row_index: usize, row_count: usize) -> i32 {
-    let info = if row_index + 1 == row_count {
-        INFO_RESERVE
-    } else {
-        0
-    };
-    reserved_for_fullscreen(row_index) + info
+    let [left, right] = corner_reserves(row_index, row_count);
+    left + right
 }
 
 fn row_width(row: &[Piece]) -> i32 {
@@ -987,23 +1005,19 @@ struct MenuState<'a> {
     time_scale: &'a mut f32,
     readout: Readout,
     changelog_open: &'a mut bool,
+    fullscreen_requested: &'a mut bool,
+    reset_requested: &'a mut bool,
 }
 
-fn menu(ctx: &egui::Context, panel: egui::Rect, scale: f32, mut state: MenuState<'_>) -> bool {
+fn menu(ctx: &egui::Context, panel: egui::Rect, scale: f32, mut state: MenuState<'_>) {
     egui::Area::new(egui::Id::new("menu"))
         .fixed_pos(panel.min)
         .constrain(false)
         .order(egui::Order::Foreground)
-        .show(ctx, |ui| menu_contents(ui, panel, scale, &mut state))
-        .inner
+        .show(ctx, |ui| menu_contents(ui, panel, scale, &mut state));
 }
 
-fn menu_contents(
-    ui: &mut egui::Ui,
-    panel: egui::Rect,
-    scale: f32,
-    state: &mut MenuState<'_>,
-) -> bool {
+fn menu_contents(ui: &mut egui::Ui, panel: egui::Rect, scale: f32, state: &mut MenuState<'_>) {
     ui.allocate_rect(panel, egui::Sense::hover());
     let grid = pixel_font::Grid::new(panel.min, MENU_PIXEL, scale);
     let [columns, height] = grid.cell(panel.max);
@@ -1014,26 +1028,59 @@ fn menu_contents(
     let rows_height = rows.len() as i32 * (ROW_HEIGHT + ROW_GAP) - ROW_GAP;
     let first_top = ((height - rows_height) / 2).max(MENU_PAD);
     for (i, row) in rows.iter().enumerate() {
-        let room = columns - reserved_for_corners(i, rows.len());
+        let [left, right] = corner_reserves(i, rows.len());
+        let room = columns - left - right;
         let top = first_top + i as i32 * (ROW_HEIGHT + ROW_GAP);
-        menu_row(ui, grid, row, [(room - row_width(row)) / 2, top], state);
+        menu_row(
+            ui,
+            grid,
+            row,
+            [left + (room - row_width(row)) / 2, top],
+            state,
+        );
     }
-    let corner = columns - MENU_PAD - FULLSCREEN.width;
     let last_top = first_top + (rows.len() as i32 - 1) * (ROW_HEIGHT + ROW_GAP);
-    let beside_fullscreen = if rows.len() == 1 {
+    let corners = Corners {
+        right: columns - MENU_PAD - FULLSCREEN.width,
+        first_top,
+        last_top,
+        single_row: rows.len() == 1,
+    };
+    corner_buttons(ui, grid, corners, state);
+}
+
+struct Corners {
+    right: i32,
+    first_top: i32,
+    last_top: i32,
+    single_row: bool,
+}
+
+fn corner_buttons(
+    ui: &mut egui::Ui,
+    grid: pixel_font::Grid,
+    corners: Corners,
+    state: &mut MenuState<'_>,
+) {
+    let beside_fullscreen = if corners.single_row {
         FULLSCREEN_RESERVE
     } else {
         0
     };
-    info_button(
+    reset_button(
         ui,
         grid,
-        [corner - beside_fullscreen, last_top],
-        state.changelog_open,
+        [MENU_PAD, corners.last_top],
+        state.reset_requested,
     );
-    state
-        .fullscreen
-        .is_some_and(|fullscreen| fullscreen_toggle(ui, grid, [corner, first_top], fullscreen))
+    let info_at = [corners.right - beside_fullscreen, corners.last_top];
+    info_button(ui, grid, info_at, state.changelog_open);
+    let Some(fullscreen) = state.fullscreen else {
+        return;
+    };
+    if fullscreen_toggle(ui, grid, [corners.right, corners.first_top], fullscreen) {
+        *state.fullscreen_requested = true;
+    }
 }
 
 fn menu_row(
@@ -1187,12 +1234,12 @@ fn controls(ui: &mut egui::Ui, grid: pixel_font::Grid, x: i32, y: i32, brush: &m
     };
     menu_slider(ui, grid, place(y), &BRUSH_SIZE, size, Some(accent));
 
-    let enabled = brush.mode != BrushMode::Paint;
+    let enabled = !matches!(brush.mode, BrushMode::Paint | BrushMode::Erase);
     let (slider, value, default) = match brush.mode {
         BrushMode::Blow | BrushMode::Burst => {
             (&BRUSH_FORCE, &mut brush.wind_speed, defaults.wind_speed)
         }
-        BrushMode::Paint | BrushMode::Heat | BrushMode::Cool => {
+        BrushMode::Paint | BrushMode::Erase | BrushMode::Heat | BrushMode::Cool => {
             (&BRUSH_RATE, &mut brush.heat_rate, defaults.heat_rate)
         }
     };
@@ -1543,6 +1590,14 @@ fn brush_outline(
 
 const FULLSCREEN_RESERVE: i32 = GROUP_GAP + FULLSCREEN.width;
 const INFO_RESERVE: i32 = GROUP_GAP + INFO.width;
+const RESET_RESERVE: i32 = GROUP_GAP + RESET.width;
+
+const RESET: pixel_font::Glyph = pixel_font::Glyph {
+    width: 7,
+    rows: [
+        0b0011101, 0b0100011, 0b1000111, 0b1000000, 0b1000001, 0b0100010, 0b0011100,
+    ],
+};
 
 const INFO: pixel_font::Glyph = pixel_font::Glyph {
     width: 7,
@@ -1572,6 +1627,12 @@ fn fullscreen_toggle(
         ("Fullscreen", &FULLSCREEN)
     };
     icon_button(ui, grid, at, icon, label, false)
+}
+
+fn reset_button(ui: &mut egui::Ui, grid: pixel_font::Grid, at: [i32; 2], requested: &mut bool) {
+    if icon_button(ui, grid, at, &RESET, "Reset the world", false) {
+        *requested = true;
+    }
 }
 
 fn info_button(ui: &mut egui::Ui, grid: pixel_font::Grid, at: [i32; 2], open: &mut bool) {
@@ -1713,14 +1774,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_menu_fits_in_three_rows_from_full_size() {
+    fn the_menu_fits_in_four_rows_from_full_size() {
         let largest = [1.0, 1.25, 1.5, 2.0, 3.0]
             .map(|scale| pixel_font::pixel_size(MENU_PIXEL, scale))
             .into_iter()
             .fold(0.0, f32::max);
         let height = menu_height_for(MENU_FULL_SIZE_WIDTH, largest);
-        let three_rows = (2 * MENU_PAD + 3 * ROW_HEIGHT + 2 * ROW_GAP) as f32 * largest;
-        assert!(height <= three_rows, "{height} > {three_rows}");
+        let four_rows = (2 * MENU_PAD + 4 * ROW_HEIGHT + 3 * ROW_GAP) as f32 * largest;
+        assert!(height <= four_rows, "{height} > {four_rows}");
 
         let narrowest = MENU_FULL_SIZE_WIDTH * MENU_MIN_ZOOM;
         assert_eq!(narrowest / zoom_for(narrowest), MENU_FULL_SIZE_WIDTH);

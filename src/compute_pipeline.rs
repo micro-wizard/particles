@@ -116,7 +116,13 @@ struct BrushStroke {
     radius: f32,
     delta: f32,
     slot_bound: u32,
-    _padding: u32,
+    protected_below: u32,
+}
+
+#[derive(Copy, Clone)]
+enum StrokeKind {
+    Heat,
+    Erase,
 }
 
 unsafe impl bytemuck::Zeroable for BrushStroke {}
@@ -163,6 +169,7 @@ pub struct Solver {
     plants_pipeline: ComputePipeline,
     grow_pipeline: ComputePipeline,
     growing: bool,
+    seeded: u32,
     slot_bound: u32,
     cell_counts: Buffer,
     counts_stale: bool,
@@ -187,8 +194,10 @@ struct Spawner {
     check_pipeline: ComputePipeline,
     commit_pipeline: ComputePipeline,
     heat_pipeline: ComputePipeline,
+    erase_pipeline: ComputePipeline,
+    forget_pipeline: ComputePipeline,
     stroke_buffer: Buffer,
-    pending_heat: Option<BrushStroke>,
+    pending_stroke: Option<(StrokeKind, BrushStroke)>,
     pending: Vec<SpawnRequest>,
     readback: Buffer,
     readback_in_flight: bool,
@@ -198,13 +207,25 @@ struct Spawner {
     requested_since_copy: u32,
 }
 
+fn filled_to_capacity(seed: &[Particle]) -> Vec<Particle> {
+    let mut particles = seed.to_vec();
+    particles.resize(config::MAX_PARTICLES as usize, Particle::dead());
+    particles
+}
+
+fn initial_allocator(seeded: u32, capacity: u32) -> Vec<u32> {
+    [capacity - seeded, seeded]
+        .into_iter()
+        .chain((seeded..capacity).rev())
+        .collect()
+}
+
 impl Solver {
     pub fn new(gpu_context: &GpuContext<'_>, seed: &[Particle]) -> Self {
         let capacity = config::MAX_PARTICLES;
         assert!(seed.len() as u32 <= capacity, "seed exceeds MAX_PARTICLES");
         let slot_bound = seed.len() as u32;
-        let mut particles = seed.to_vec();
-        particles.resize(capacity as usize, Particle::dead());
+        let particles = filled_to_capacity(seed);
         let grid = padded_grid();
         let cell_count = grid[0] * grid[1];
         let padded_cells = cell_count.div_ceil(4) * 4;
@@ -418,6 +439,7 @@ impl Solver {
             plants_pipeline: pipeline("Plant Forces", &shader, "plant_forces"),
             grow_pipeline: pipeline("Grow Plants And Emit Flames", &shader, "grow_and_emit"),
             growing: false,
+            seeded: slot_bound,
             slot_bound,
             cell_counts,
             counts_stale: true,
@@ -632,14 +654,39 @@ impl Solver {
         self.spawn.live_count
     }
 
+    pub fn placed_count(&self) -> u32 {
+        self.live_count().saturating_sub(self.seeded)
+    }
+
     pub fn heat(&mut self, centre: [f32; 2], radius: f32, delta: f32) {
-        self.spawn.pending_heat = Some(BrushStroke {
+        self.spawn.pending_stroke = Some((StrokeKind::Heat, self.stroke(centre, radius, delta)));
+    }
+
+    pub fn erase(&mut self, centre: [f32; 2], radius: f32) {
+        self.spawn.pending_stroke = Some((StrokeKind::Erase, self.stroke(centre, radius, 0.0)));
+    }
+
+    fn stroke(&self, centre: [f32; 2], radius: f32, delta: f32) -> BrushStroke {
+        BrushStroke {
             centre,
             radius,
             delta,
             slot_bound: self.slot_bound,
-            _padding: 0,
-        });
+            protected_below: self.seeded,
+        }
+    }
+
+    pub fn reset(&mut self, gpu_context: &GpuContext<'_>, seed: &[Particle]) {
+        let particles = filled_to_capacity(seed);
+        gpu_context
+            .queue
+            .write_buffer(&self.particle_buffer, 0, bytemuck::cast_slice(&particles));
+        self.seeded = seed.len() as u32;
+        self.spawn.reset(gpu_context, self.seeded);
+        self.slot_bound = self.seeded;
+        self.counts_stale = true;
+        self.growing = false;
+        self.write_params(gpu_context);
     }
 
     pub fn gust(&self) -> Gust {
@@ -681,8 +728,8 @@ impl Solver {
             .pending
             .len()
             .min(config::MAX_SPAWNS_PER_FRAME as usize);
-        let heating = self.spawn.pending_heat.is_some();
-        if substeps == 0 && spawn_count == 0 && !heating && !self.spawn.wants_readback() {
+        let stroking = self.spawn.pending_stroke.is_some();
+        if substeps == 0 && spawn_count == 0 && !stroking && !self.spawn.wants_readback() {
             return;
         }
 
@@ -693,7 +740,9 @@ impl Solver {
                     label: Some("Solver Encoder"),
                 });
         self.record_spawns(gpu_context, &mut encoder, spawn_count);
-        self.spawn.record_heat(gpu_context, &mut encoder);
+        if self.spawn.record_stroke(gpu_context, &mut encoder) {
+            self.counts_stale = true;
+        }
         let timing = self.timer.as_ref().is_some_and(PassTimer::is_idle);
         self.record_simulation(&mut encoder, substeps, timing);
 
@@ -849,15 +898,9 @@ impl Spawner {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/spawn.wgsl").into()),
         });
 
-        // Free count and high-water mark, then the stack of free slots: one
-        // buffer so the solver's `grow` can allocate within its binding limit.
-        let allocator: Vec<u32> = [capacity - seeded, seeded]
-            .into_iter()
-            .chain((seeded..capacity).rev())
-            .collect();
         let allocator = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Slot Allocator"),
-            contents: bytemuck::cast_slice(&allocator),
+            contents: bytemuck::cast_slice(&initial_allocator(seeded, capacity)),
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -980,8 +1023,10 @@ impl Spawner {
             check_pipeline: pipeline("Check Spawns", "check_spawns"),
             commit_pipeline: pipeline("Commit Spawns", "commit_spawns"),
             heat_pipeline: pipeline("Heat Brush", "heat_brush"),
+            erase_pipeline: pipeline("Erase Brush", "erase_brush"),
+            forget_pipeline: pipeline("Forget Erased Relatives", "forget_erased_relatives"),
             stroke_buffer,
-            pending_heat: None,
+            pending_stroke: None,
             pending: Vec::new(),
             readback,
             readback_in_flight: false,
@@ -1048,20 +1093,46 @@ impl Spawner {
         self.requested_since_copy += count as u32;
     }
 
-    fn record_heat(&mut self, gpu_context: &GpuContext<'_>, encoder: &mut wgpu::CommandEncoder) {
-        let Some(stroke) = self.pending_heat.take() else {
-            return;
+    fn record_stroke(
+        &mut self,
+        gpu_context: &GpuContext<'_>,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> bool {
+        let Some((kind, stroke)) = self.pending_stroke.take() else {
+            return false;
         };
         gpu_context
             .queue
             .write_buffer(&self.stroke_buffer, 0, bytemuck::bytes_of(&stroke));
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Heat Brush Pass"),
+            label: Some("Brush Stroke Pass"),
             timestamp_writes: None,
         });
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_pipeline(&self.heat_pipeline);
-        pass.dispatch_workgroups(stroke.slot_bound.div_ceil(WORKGROUP_SIZE), 1, 1);
+        let groups = stroke.slot_bound.div_ceil(WORKGROUP_SIZE);
+        let pipelines = match kind {
+            StrokeKind::Heat => vec![&self.heat_pipeline],
+            StrokeKind::Erase => vec![&self.erase_pipeline, &self.forget_pipeline],
+        };
+        for pipeline in pipelines {
+            pass.set_pipeline(pipeline);
+            pass.dispatch_workgroups(groups, 1, 1);
+        }
+        let erased = matches!(kind, StrokeKind::Erase);
+        self.count_stale |= erased;
+        erased
+    }
+
+    fn reset(&mut self, gpu_context: &GpuContext<'_>, seeded: u32) {
+        let allocator = initial_allocator(seeded, config::MAX_PARTICLES);
+        gpu_context
+            .queue
+            .write_buffer(&self.allocator, 0, bytemuck::cast_slice(&allocator));
+        self.pending.clear();
+        self.pending_stroke = None;
+        self.live_count = seeded;
+        self.requested_since_copy = 0;
+        self.count_stale = true;
     }
 
     fn wants_readback(&self) -> bool {

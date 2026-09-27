@@ -241,6 +241,7 @@ impl<'a> Controller<'a> {
                                 self.model.blow(world, radius, [x * speed, y * speed], 0.0);
                             }
                             BrushMode::Burst => self.model.blow(world, radius, [0.0, 0.0], speed),
+                            BrushMode::Erase => self.model.erase(world, radius),
                         }
                     }
                 } else {
@@ -275,6 +276,9 @@ impl<'a> Controller<'a> {
                     .set_menu_height(self.overlay.menu_height() * scale, &self.gpu_context);
                 if self.overlay.take_fullscreen_request() {
                     self.toggle_fullscreen();
+                }
+                if self.overlay.take_reset_request() {
+                    self.model.reset(&self.gpu_context);
                 }
                 let (materials, globals) = (self.overlay.materials, self.overlay.globals);
                 self.model
