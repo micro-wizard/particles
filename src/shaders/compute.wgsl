@@ -24,7 +24,7 @@ struct Params {
     gust_radius: f32,
     gust_outflow: f32,
     contact_parity: u32,
-    _padding: u32,
+    rest_temperature: f32,
 };
 
 struct MaterialParams {
@@ -97,7 +97,7 @@ const PACKED_INDEX_MASK: u32 = (1u << PACKED_MATERIAL_SHIFT) - 1u;
 @group(0) @binding(6) var<storage, read_write> contacts: array<ContactRecord>;
 @group(0) @binding(7) var<storage, read> materials: array<MaterialParams>;
 
-// The spawner's slot allocator, shared so `grow` can place new plant nodes.
+
 struct SlotAllocator {
     free_count: atomic<u32>,
     high_water: atomic<u32>,
@@ -110,77 +110,19 @@ const NO_CONTACT: u32 = 0xFFFFFFFFu;
 const DEAD: u32 = 0xFFFFFFFFu;
 const NO_TRANSITION: u32 = 0xFFFFFFFFu;
 const NO_PARENT: u32 = 0xFFFFFFFFu;
-const BEND_SCALE: f32 = 0.15;
-const UP: vec2<f32> = vec2<f32>(0.0, -1.0);
-const MAX_SHOOTS: u32 = 2u;
+const NO_ENTRY: u32 = 0xFFFFFFFFu;
+const NO_SLOT: u32 = 0xFFFFFFFFu;
 
-struct Link {
-    position: vec2<f32>,
-    velocity: vec2<f32>,
-    radius: f32,
-    mass: f32,
-    bond_freq: f32,
-    zeta: f32,
-    rest_angle: f32,
-    index: u32,
-    parent: u32,
-};
-
-fn rotate(v: vec2<f32>, angle: f32) -> vec2<f32> {
-    let c = cos(angle);
-    let s = sin(angle);
-    return vec2<f32>(c * v.x - s * v.y, s * v.x + c * v.y);
+fn material_params(id: u32) -> MaterialParams {
+    return materials[min(id, params.material_count - 1u)];
 }
 
-fn bend_spring(parent: Link, child: Link) -> Mixed {
-    var m = spring(
-        BEND_SCALE * sqrt(parent.bond_freq * child.bond_freq),
-        0.0,
-        sqrt(parent.zeta * child.zeta),
-        0.0,
-        0.5 * min(parent.mass, child.mass),
-        0.0,
-    );
-    m.gamma_n = m.gamma_n / (1.0 + m.gamma_n * params.dt / max(m.mass, 1e-9));
-    return m;
+fn mass_of(material: MaterialParams, radius: f32) -> f32 {
+    return material.density * radius * radius;
 }
 
-fn joint_error(grandparent: Link, parent: Link, child: Link) -> vec2<f32> {
-    let s = (child.radius + parent.radius) / (parent.radius + grandparent.radius);
-    let d = (child.position - parent.position)
-        - s * rotate(parent.position - grandparent.position, child.rest_angle);
-    let dv = (child.velocity - parent.velocity)
-        - s * rotate(parent.velocity - grandparent.velocity, child.rest_angle);
-    let m = bend_spring(parent, child);
-    return m.k_n * d + m.gamma_n * dv;
-}
-
-fn joint_reaction(grandparent: Link, parent: Link, child: Link, error: vec2<f32>) -> vec2<f32> {
-    let s = (child.radius + parent.radius) / (parent.radius + grandparent.radius);
-    return s * rotate(error, -child.rest_angle);
-}
-
-fn in_reach(a: vec2<f32>, b: vec2<f32>) -> bool {
-    let d = a - b;
-    return dot(d, d) < params.smoothing_radius * params.smoothing_radius;
-}
-
-fn link_at(entry: u32) -> Link {
-    let e = cell_entries[entry];
-    let index = e.packed & PACKED_INDEX_MASK;
-    let m = materials[min(e.packed >> PACKED_MATERIAL_SHIFT, params.material_count - 1u)];
-    let node = particles[index];
-    return Link(
-        e.position, e.velocity, e.radius, m.density * e.radius * e.radius,
-        m.bond_freq, m.zeta_n, node.rest_angle, index, node.parent,
-    );
-}
-
-fn root_error(seed: Link, child: Link) -> vec2<f32> {
-    let d = (child.position - seed.position)
-        - (child.radius + seed.radius) * rotate(UP, child.rest_angle);
-    let m = bend_spring(seed, child);
-    return m.k_n * d + m.gamma_n * (child.velocity - seed.velocity);
+fn sorted_entry_count() -> u32 {
+    return cell_start[params.grid.x * params.grid.y];
 }
 
 fn cell_of(position: vec2<f32>) -> vec2<i32> {
@@ -192,6 +134,27 @@ fn cell_index_of(position: vec2<f32>) -> u32 {
     let cx = u32(clamp(cell.x, 0, i32(params.grid.x) - 1));
     let cy = u32(clamp(cell.y, 0, i32(params.grid.y) - 1));
     return cx + cy * params.grid.x;
+}
+
+struct EntryRange {
+    first: u32,
+    end: u32,
+};
+
+fn entries_in_row(centre_cell: vec2<i32>, dy: i32) -> EntryRange {
+    let cy = centre_cell.y + dy;
+    let x_lo = max(centre_cell.x - params.sweep, 0);
+    let x_hi = min(centre_cell.x + params.sweep, i32(params.grid.x) - 1);
+    if cy < 0 || cy >= i32(params.grid.y) || x_lo > x_hi {
+        return EntryRange(0u, 0u);
+    }
+    let row = u32(cy) * params.grid.x;
+    return EntryRange(cell_start[row + u32(x_lo)], cell_start[row + u32(x_hi) + 1u]);
+}
+
+fn within_smoothing_radius(a: vec2<f32>, b: vec2<f32>) -> bool {
+    let d = a - b;
+    return dot(d, d) < params.smoothing_radius * params.smoothing_radius;
 }
 
 @compute @workgroup_size(64)
@@ -268,6 +231,14 @@ fn pressure_of(m: MaterialParams, packed: f32, temperature: f32) -> f32 {
     return crowding * heat;
 }
 
+fn carried_contacts_of(index: u32) -> u32 {
+    return (index * 2u + params.contact_parity) * params.max_contacts;
+}
+
+fn kept_contacts_of(index: u32) -> u32 {
+    return (index * 2u + 1u - params.contact_parity) * params.max_contacts;
+}
+
 fn remembered_tangent(carried: u32, partner: u32) -> vec2<f32> {
     for (var slot = 0u; slot < params.max_contacts; slot++) {
         let record = contacts[carried + slot];
@@ -279,6 +250,18 @@ fn remembered_tangent(carried: u32, partner: u32) -> vec2<f32> {
         }
     }
     return vec2<f32>(0.0);
+}
+
+fn end_contact_history(index: u32, kept: u32) {
+    if kept < params.max_contacts {
+        contacts[kept_contacts_of(index) + kept] = ContactRecord(NO_CONTACT, 0u, vec2<f32>(0.0));
+    }
+}
+
+fn clear_contact_history(slot: u32) {
+    let empty = ContactRecord(NO_CONTACT, 0u, vec2<f32>(0.0));
+    contacts[(slot * 2u) * params.max_contacts] = empty;
+    contacts[(slot * 2u + 1u) * params.max_contacts] = empty;
 }
 
 struct Resolved {
@@ -322,6 +305,14 @@ fn mix_materials(a: MaterialParams, b: MaterialParams, mass_a: f32, mass_b: f32)
     );
 }
 
+fn grips(a: MaterialParams, b: MaterialParams) -> bool {
+    return min(a.mu, b.mu) > FRICTIONLESS;
+}
+
+fn implicit_damping(gamma: f32, mass: f32) -> f32 {
+    return gamma / (1.0 + gamma * params.dt / max(mass, 1e-9));
+}
+
 fn resolve_contact(
     overlap: f32,
     normal: vec2<f32>,
@@ -330,8 +321,8 @@ fn resolve_contact(
     carried: vec2<f32>,
 ) -> Resolved {
     let approach = dot(relative_velocity, normal);
-    let gamma_n = m.gamma_n / (1.0 + m.gamma_n * params.dt / max(m.mass, 1e-9));
-    let gamma_t = m.gamma_t / (1.0 + m.gamma_t * params.dt / max(m.mass, 1e-9));
+    let gamma_n = implicit_damping(m.gamma_n, m.mass);
+    let gamma_t = implicit_damping(m.gamma_t, m.mass);
     let f_n = max(m.k_n * overlap - gamma_n * approach, 0.0);
     let slip = relative_velocity - approach * normal;
     var tangent = carried - dot(carried, normal) * normal;
@@ -355,351 +346,572 @@ fn resolve_contact(
     return out;
 }
 
-fn bond_force(stretch: f32, normal: vec2<f32>, relative_velocity: vec2<f32>, m: Mixed) -> vec2<f32> {
-    let gamma = m.gamma_n / (1.0 + m.gamma_n * params.dt / max(m.mass, 1e-9));
-    return (m.k_n * stretch + gamma * dot(relative_velocity, normal)) * normal;
-}
+struct Grain {
+    entry: CellEntry,
+    index: u32,
+    material_id: u32,
+    material: MaterialParams,
+    volume: f32,
+    mass: f32,
+    pressure: f32,
+};
 
-const NO_ENTRY: u32 = 0xFFFFFFFFu;
-
-fn family_force(me: CellEntry, index: u32, mine: MaterialParams, mass: f32) -> vec2<f32> {
-    let own = particles[index];
-    let myself = Link(
-        me.position, me.velocity, me.radius, mass,
-        mine.bond_freq, mine.zeta_n, own.rest_angle, index, own.parent,
+fn grain_at(entry_index: u32) -> Grain {
+    let entry = cell_entries[entry_index];
+    let material_id = entry.packed >> PACKED_MATERIAL_SHIFT;
+    let material = material_params(material_id);
+    return Grain(
+        entry,
+        entry.packed & PACKED_INDEX_MASK,
+        material_id,
+        material,
+        entry.radius * entry.radius,
+        mass_of(material, entry.radius),
+        pressure_of(material, entry.packing, entry.temperature),
     );
-    let h = params.smoothing_radius;
-    var parent_entry = NO_ENTRY;
-    var grandparent_entry = NO_ENTRY;
-    var shoot_entries: array<u32, MAX_SHOOTS>;
-    var shoot_count = 0u;
-    var grandshoot_entries: array<u32, MAX_SHOOTS * MAX_SHOOTS>;
-    var grandshoot_count = 0u;
-    var force = vec2<f32>(0.0);
-
-    let base = cell_of(me.position);
-    let x_lo = max(base.x - params.sweep, 0);
-    let x_hi = min(base.x + params.sweep, i32(params.grid.x) - 1);
-    for (var dy = -params.sweep; dy <= params.sweep; dy++) {
-        let cy = base.y + dy;
-        if cy < 0 || cy >= i32(params.grid.y) || x_lo > x_hi {
-            continue;
-        }
-        let row = u32(cy) * params.grid.x;
-        let run_end = cell_start[row + u32(x_hi) + 1u];
-        for (var entry = cell_start[row + u32(x_lo)]; entry < run_end; entry++) {
-            let other = cell_entries[entry];
-            let other_index = other.packed & PACKED_INDEX_MASK;
-            if other_index == index {
-                continue;
-            }
-            let offset = other.position - me.position;
-            let dist_sq = dot(offset, offset);
-            if dist_sq >= h * h || dist_sq <= 1e-12 {
-                continue;
-            }
-            let theirs = materials[min(other.packed >> PACKED_MATERIAL_SHIFT, params.material_count - 1u)];
-            if theirs.bond_freq <= 0.0 {
-                continue;
-            }
-            let node = particles[other_index];
-            if own.grandparent == other_index {
-                grandparent_entry = entry;
-            }
-            if node.grandparent == index && grandshoot_count < MAX_SHOOTS * MAX_SHOOTS {
-                grandshoot_entries[grandshoot_count] = entry;
-                grandshoot_count += 1u;
-            }
-            let is_parent = own.parent == other_index;
-            let is_child = node.parent == index;
-            if is_parent {
-                parent_entry = entry;
-            } else if is_child && shoot_count < MAX_SHOOTS {
-                shoot_entries[shoot_count] = entry;
-                shoot_count += 1u;
-            }
-            if is_parent || is_child {
-                let distance = sqrt(dist_sq);
-                let touching = me.radius + other.radius;
-                let their_mass = theirs.density * other.radius * other.radius;
-                let m = spring(
-                    sqrt(mine.bond_freq * theirs.bond_freq), 0.0,
-                    sqrt(mine.zeta_n * theirs.zeta_n), 0.0,
-                    0.5 * min(mass, their_mass), 0.0,
-                );
-                force += bond_force(distance - touching, offset / distance, other.velocity - me.velocity, m);
-
-                if distance < touching {
-                    let mixed = mix_materials(mine, theirs, mass, their_mass);
-                    var tangent = vec2<f32>(0.0);
-                    if mixed.mu > FRICTIONLESS {
-                        let carried = (index * 2u + params.contact_parity) * params.max_contacts;
-                        tangent = remembered_tangent(carried, other_index);
-                    }
-                    force -= resolve_contact(
-                        touching - distance,
-                        offset / distance,
-                        other.velocity - me.velocity,
-                        mixed,
-                        tangent,
-                    ).force;
-                }
-            }
-        }
-    }
-
-    let has_parent = parent_entry != NO_ENTRY;
-    if has_parent {
-        force.y -= params.gravity * (mass - params.ambient_density * me.radius * me.radius);
-    }
-
-    var parent: Link;
-    if has_parent {
-        parent = link_at(parent_entry);
-        if own.grandparent == NO_PARENT {
-            force -= root_error(parent, myself);
-        } else if grandparent_entry != NO_ENTRY {
-            let grandparent = link_at(grandparent_entry);
-            if in_reach(parent.position, grandparent.position) {
-                force -= joint_error(grandparent, parent, myself);
-            }
-        }
-    }
-    for (var i = 0u; i < shoot_count; i++) {
-        let shoot = link_at(shoot_entries[i]);
-        if own.parent == NO_PARENT {
-            force += root_error(myself, shoot);
-        } else if has_parent && in_reach(shoot.position, parent.position) {
-            let error = joint_error(parent, myself, shoot);
-            force += error + joint_reaction(parent, myself, shoot, error);
-        }
-    }
-    for (var i = 0u; i < grandshoot_count; i++) {
-        let grandshoot = link_at(grandshoot_entries[i]);
-        for (var j = 0u; j < shoot_count; j++) {
-            let shoot = link_at(shoot_entries[j]);
-            if shoot.index == grandshoot.parent && in_reach(shoot.position, grandshoot.position) {
-                let error = joint_error(myself, shoot, grandshoot);
-                force -= joint_reaction(myself, shoot, grandshoot, error);
-            }
-        }
-    }
-    return force;
 }
 
-@compute @workgroup_size(64)
-fn plant_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let entry_index = global_id.x;
-    if entry_index >= cell_start[params.grid.x * params.grid.y] {
-        return;
-    }
-    let me = cell_entries[entry_index];
-    let index = me.packed & PACKED_INDEX_MASK;
-    let mine = materials[min(me.packed >> PACKED_MATERIAL_SHIFT, params.material_count - 1u)];
-    if mine.bond_freq <= 0.0 || mine.is_static > 0.5 {
-        return;
-    }
-    let mass = mine.density * me.radius * me.radius;
-    particles[index].stem_force = family_force(me, index, mine, mass);
+struct Neighbour {
+    entry: CellEntry,
+    index: u32,
+    material: MaterialParams,
+    offset: vec2<f32>,
+    distance: f32,
+    volume: f32,
+    mass: f32,
+};
+
+fn is_neighbour(me: Grain, other: CellEntry) -> bool {
+    let offset = other.position - me.entry.position;
+    let dist_sq = dot(offset, offset);
+    let h = params.smoothing_radius;
+    return (other.packed & PACKED_INDEX_MASK) != me.index && dist_sq > 1e-12 && dist_sq < h * h;
 }
 
-@compute @workgroup_size(64)
-fn solve(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let entry_index = global_id.x;
-    if entry_index >= cell_start[params.grid.x * params.grid.y] {
+fn neighbour_from(me: Grain, other: CellEntry) -> Neighbour {
+    let offset = other.position - me.entry.position;
+    let material = material_params(other.packed >> PACKED_MATERIAL_SHIFT);
+    return Neighbour(
+        other,
+        other.packed & PACKED_INDEX_MASK,
+        material,
+        offset,
+        sqrt(dot(offset, offset)),
+        other.radius * other.radius,
+        mass_of(material, other.radius),
+    );
+}
+
+fn touching(me: Grain, them: Neighbour) -> bool {
+    return them.distance < me.entry.radius + them.entry.radius;
+}
+
+fn heat_conducted_from(me: Grain, them: Neighbour) -> f32 {
+    let conductivity = 0.5 * (me.material.conductivity + them.material.conductivity);
+    if conductivity <= 0.0 {
+        return 0.0;
+    }
+    return conductivity * me.volume * them.volume
+        * (them.entry.temperature - me.entry.temperature)
+        * lap_viscosity(them.distance, params.smoothing_radius);
+}
+
+fn pressure_force_from(me: Grain, them: Neighbour, their_pressure: f32) -> vec2<f32> {
+    var pressure_me = me.pressure;
+    var pressure_them = their_pressure;
+    if me.material.pressure_k == 0.0 {
+        pressure_me = pressure_of(them.material, me.entry.packing, me.entry.temperature);
+    }
+    if them.material.pressure_k == 0.0 {
+        pressure_them = pressure_of(me.material, them.entry.packing, them.entry.temperature);
+    }
+    return me.volume * them.volume
+        * (pressure_me + pressure_them)
+        * dw_spiky(them.distance, params.smoothing_radius) * (them.offset / them.distance);
+}
+
+fn viscous_force_from(me: Grain, them: Neighbour) -> vec2<f32> {
+    let viscosity = 0.5 * (me.material.viscosity + them.material.viscosity);
+    if viscosity <= 0.0 {
+        return vec2<f32>(0.0);
+    }
+    return viscosity * me.volume * them.volume
+        * (them.entry.velocity - me.entry.velocity)
+        * lap_viscosity(them.distance, params.smoothing_radius);
+}
+
+fn fluid_force_from(me: Grain, them: Neighbour) -> vec2<f32> {
+    let their_pressure = pressure_of(them.material, them.entry.packing, them.entry.temperature);
+    if !(me.pressure > 0.0 || their_pressure > 0.0) {
+        return vec2<f32>(0.0);
+    }
+    return pressure_force_from(me, them, their_pressure) + viscous_force_from(me, them);
+}
+
+fn shelter_from(me: Grain, them: Neighbour) -> f32 {
+    let contact_distance = me.entry.radius + them.entry.radius;
+    if them.distance >= contact_distance * params.shelter_reach
+        || them.material.thermal_expansion > 0.0 {
+        return 0.0;
+    }
+    return them.entry.radius / contact_distance;
+}
+
+fn contact_between(me: Grain, them: Neighbour) -> Resolved {
+    let mixed = mix_materials(me.material, them.material, me.mass, them.mass);
+    var carried = vec2<f32>(0.0);
+    if grips(me.material, them.material) {
+        carried = remembered_tangent(carried_contacts_of(me.index), them.index);
+    }
+    return resolve_contact(
+        me.entry.radius + them.entry.radius - them.distance,
+        them.offset / them.distance,
+        them.entry.velocity - me.entry.velocity,
+        mixed,
+        carried,
+    );
+}
+
+struct Surroundings {
+    force: vec2<f32>,
+    heat: f32,
+    shelter: f32,
+    packing: f32,
+    contacts_kept: u32,
+};
+
+fn remember_contact(me: Grain, them: Neighbour, tangent: vec2<f32>, around: ptr<function, Surroundings>) {
+    if !grips(me.material, them.material) || (*around).contacts_kept >= params.max_contacts {
         return;
     }
-    let me = cell_entries[entry_index];
-    let index = me.packed & PACKED_INDEX_MASK;
-    let my_material = me.packed >> PACKED_MATERIAL_SHIFT;
-    let mine = materials[min(my_material, params.material_count - 1u)];
-    if mine.is_static > 0.5 {
-        particles[index].temperature = mine.default_temperature;
+    contacts[kept_contacts_of(me.index) + (*around).contacts_kept] =
+        ContactRecord(them.index, 0u, tangent);
+    (*around).contacts_kept += 1u;
+}
+
+fn press_against(me: Grain, them: Neighbour, around: ptr<function, Surroundings>) {
+    if !touching(me, them) {
         return;
     }
-    let my_volume = me.radius * me.radius;
-    let mass = mine.density * my_volume;
-    var force = vec2<f32>(0.0, params.gravity * (mass - params.ambient_density * my_volume));
-    let h = params.smoothing_radius;
-    let my_pressure = pressure_of(mine, me.packing, me.temperature);
-    var heat = 0.0;
-    var shelter = 0.0;
-    var packed_next = my_volume * w_poly6(0.0, h);
-    let carried = (index * 2u + params.contact_parity) * params.max_contacts;
-    let keeping = (index * 2u + 1u - params.contact_parity) * params.max_contacts;
-    var kept = 0u;
-    let base = cell_of(me.position);
-    let x_lo = max(base.x - params.sweep, 0);
-    let x_hi = min(base.x + params.sweep, i32(params.grid.x) - 1);
+    let contact = contact_between(me, them);
+    (*around).force += contact.force;
+    remember_contact(me, them, contact.tangent, around);
+}
+
+fn feel_neighbour(me: Grain, other: CellEntry, around: ptr<function, Surroundings>) {
+    if !is_neighbour(me, other) {
+        return;
+    }
+    let them = neighbour_from(me, other);
+    (*around).packing += them.volume * w_poly6(them.distance, params.smoothing_radius);
+    (*around).heat += heat_conducted_from(me, them);
+    (*around).force += fluid_force_from(me, them);
+    (*around).shelter += shelter_from(me, them);
+    press_against(me, them, around);
+}
+
+fn sense_surroundings(me: Grain) -> Surroundings {
+    var around = Surroundings(
+        vec2<f32>(0.0), 0.0, 0.0, me.volume * w_poly6(0.0, params.smoothing_radius), 0u,
+    );
+    let centre_cell = cell_of(me.entry.position);
     for (var dy = -params.sweep; dy <= params.sweep; dy++) {
-        let cy = base.y + dy;
-        if cy < 0 || cy >= i32(params.grid.y) || x_lo > x_hi {
-            continue;
-        }
-        let row = u32(cy) * params.grid.x;
-        let run_end = cell_start[row + u32(x_hi) + 1u];
-
-        for (var entry = cell_start[row + u32(x_lo)]; entry < run_end; entry++) {
-
-            let other = cell_entries[entry];
-            let other_index = other.packed & PACKED_INDEX_MASK;
-            if other_index == index {
-                continue;
-            }
-
-            let offset = other.position - me.position;
-            let dist_sq = dot(offset, offset);
-            if dist_sq >= h * h || dist_sq <= 1e-12 {
-                continue;
-            }
-            let distance = sqrt(dist_sq);
-
-            let other_material = other.packed >> PACKED_MATERIAL_SHIFT;
-            let theirs = materials[min(other_material, params.material_count - 1u)];
-            let their_mass = theirs.density * other.radius * other.radius;
-            {
-                packed_next += other.radius * other.radius * w_poly6(distance, h);
-                let conductivity = 0.5 * (mine.conductivity + theirs.conductivity);
-                if conductivity > 0.0 {
-                    heat += conductivity * my_volume * (other.radius * other.radius)
-                        * (other.temperature - me.temperature)
-                        * lap_viscosity(distance, h);
-                }
-
-                let their_pressure = pressure_of(theirs, other.packing, other.temperature);
-
-                if my_pressure > 0.0 || their_pressure > 0.0 {
-                    let direction = offset / distance;
-                    let their_volume = other.radius * other.radius;
-                    var pressure_me = my_pressure;
-                    var pressure_them = their_pressure;
-                    if mine.pressure_k == 0.0 {
-                        pressure_me = pressure_of(theirs, me.packing, me.temperature);
-                    }
-                    if theirs.pressure_k == 0.0 {
-                        pressure_them = pressure_of(mine, other.packing, other.temperature);
-                    }
-
-                    force += my_volume * their_volume
-                        * (pressure_me + pressure_them)
-                        * dw_spiky(distance, h) * direction;
-                    let viscosity = 0.5 * (mine.viscosity + theirs.viscosity);
-                    if viscosity > 0.0 {
-                        force += viscosity * my_volume * their_volume
-                            * (other.velocity - me.velocity)
-                            * lap_viscosity(distance, h);
-                    }
-                }
-            }
-
-            let touching = me.radius + other.radius;
-            if distance < touching * params.shelter_reach
-                && theirs.thermal_expansion <= 0.0 {
-                shelter += other.radius / touching;
-            }
-            if distance >= touching {
-                continue;
-            }
-            let mixed = mix_materials(mine, theirs, mass, their_mass);
-            let gripping = mixed.mu > FRICTIONLESS;
-            var spring = vec2<f32>(0.0);
-            if gripping {
-                spring = remembered_tangent(carried, other_index);
-            }
-            let resolved = resolve_contact(
-                touching - distance,
-                offset / distance,
-                other.velocity - me.velocity,
-                mixed,
-                spring,
-            );
-            force += resolved.force;
-
-            if gripping && kept < params.max_contacts {
-                contacts[keeping + kept] =
-                    ContactRecord(other_index, 0u, resolved.tangent);
-                kept += 1u;
-            }
+        let row = entries_in_row(centre_cell, dy);
+        for (var entry = row.first; entry < row.end; entry++) {
+            feel_neighbour(me, cell_entries[entry], &around);
         }
     }
+    return around;
+}
 
-    if kept < params.max_contacts {
-        contacts[keeping + kept] = ContactRecord(NO_CONTACT, 0u, vec2<f32>(0.0));
+fn weight_of(me: Grain) -> vec2<f32> {
+    return vec2<f32>(0.0, params.gravity * (me.mass - params.ambient_density * me.volume));
+}
+
+fn stem_force_on(me: Grain) -> vec2<f32> {
+    if me.material.bond_freq <= 0.0 {
+        return vec2<f32>(0.0);
     }
+    return particles[me.index].stem_force;
+}
 
-    if mine.bond_freq > 0.0 {
-        force += particles[index].stem_force;
-    }
-
+fn air_velocity_at(position: vec2<f32>) -> vec2<f32> {
     var air = vec2<f32>(params.wind, 0.0);
-    let from_gust = me.position - params.gust_centre;
+    let from_gust = position - params.gust_centre;
     let gust_distance = length(from_gust);
     if gust_distance < params.gust_radius {
         air += params.gust_velocity
             + params.gust_outflow * from_gust / max(gust_distance, 1e-6);
     }
-    let exposure = 1.0 - min(shelter / 3.0, 1.0);
-    let relative_air = air - me.velocity;
-    let drag = params.air_drag * params.ambient_density * me.radius * exposure
-        * length(relative_air);
-    force += relative_air * drag / (1.0 + drag * params.dt / mass);
+    return air;
+}
 
-    var velocity = me.velocity + (force / mass) * params.dt;
+fn exposure_to_air(shelter: f32) -> f32 {
+    return 1.0 - min(shelter / 3.0, 1.0);
+}
+
+fn air_drag_on(me: Grain, shelter: f32) -> vec2<f32> {
+    let relative_air = air_velocity_at(me.entry.position) - me.entry.velocity;
+    let drag = params.air_drag * params.ambient_density * me.entry.radius
+        * exposure_to_air(shelter) * length(relative_air);
+    return relative_air * drag / (1.0 + drag * params.dt / me.mass);
+}
+
+fn speed_limited(velocity: vec2<f32>) -> vec2<f32> {
     let speed = length(velocity);
     if speed > params.max_speed {
-        velocity *= params.max_speed / speed;
+        return velocity * (params.max_speed / speed);
     }
+    return velocity;
+}
 
-    let unclamped = me.position + velocity * params.dt;
-    let position = clamp(unclamped, vec2<f32>(0.0), params.world);
-    velocity = select(velocity, vec2<f32>(0.0), position != unclamped);
-
-    let old_cell = cell_index_of(me.position);
-    let new_cell = cell_index_of(position);
+fn move_cell_count(old_position: vec2<f32>, new_position: vec2<f32>) {
+    let old_cell = cell_index_of(old_position);
+    let new_cell = cell_index_of(new_position);
     if new_cell != old_cell {
         atomicSub(&cell_counts[old_cell], 1u);
         atomicAdd(&cell_counts[new_cell], 1u);
     }
+}
 
-    var drawn = particles[index].drawn;
-    if distance(position, drawn) > params.render_hysteresis {
-        drawn = position;
+fn drawn_after_moving_to(index: u32, position: vec2<f32>) -> vec2<f32> {
+    let drawn = particles[index].drawn;
+    return select(drawn, position, distance(position, drawn) > params.render_hysteresis);
+}
+
+fn move_grain(me: Grain, force: vec2<f32>) {
+    var velocity = speed_limited(me.entry.velocity + (force / me.mass) * params.dt);
+    let unclamped = me.entry.position + velocity * params.dt;
+    let position = clamp(unclamped, vec2<f32>(0.0), params.world);
+    velocity = select(velocity, vec2<f32>(0.0), position != unclamped);
+    move_cell_count(me.entry.position, position);
+    particles[me.index].drawn = drawn_after_moving_to(me.index, position);
+    particles[me.index].position = position;
+    particles[me.index].velocity = velocity;
+}
+
+fn material_at_temperature(me: Grain, temperature: f32) -> u32 {
+    let m = me.material;
+    if m.becomes_above != NO_TRANSITION && temperature > m.above_point {
+        return m.becomes_above;
     }
-    var temperature = me.temperature
-        + heat * params.dt / max(mass * mine.heat_capacity, 1e-9)
-        + mine.heat_release * params.dt;
-    temperature = clamp(temperature, params.min_temperature, params.max_temperature);
-
-    var material = my_material;
-    if mine.becomes_above != NO_TRANSITION && temperature > mine.above_point {
-        material = mine.becomes_above;
-    } else if mine.becomes_below != NO_TRANSITION && temperature < mine.below_point {
-        material = mine.becomes_below;
+    if m.becomes_below != NO_TRANSITION && temperature < m.below_point {
+        return m.becomes_below;
     }
+    return me.material_id;
+}
 
-    if mine.sprouts != NO_TRANSITION {
-        let sprout = particles[index].sprout;
-        if (sprout & SHOOT_MASK) != 0u && !grown(sprout, mine) {
-            particles[index].sprout = sprout + TICK;
+const AIR_HEAT_EXCHANGE: f32 = 0.1;
+
+fn heat_exchanged_with_air(me: Grain, shelter: f32) -> f32 {
+    return AIR_HEAT_EXCHANGE * exposure_to_air(shelter)
+        * (params.rest_temperature - me.entry.temperature)
+        * params.dt / max(me.material.heat_capacity, 1e-9);
+}
+
+fn heat_grain(me: Grain, around: Surroundings) {
+    let temperature = clamp(
+        me.entry.temperature
+            + around.heat * params.dt / max(me.mass * me.material.heat_capacity, 1e-9)
+            + heat_exchanged_with_air(me, around.shelter)
+            + me.material.heat_release * params.dt,
+        params.min_temperature,
+        params.max_temperature,
+    );
+    particles[me.index].temperature = temperature;
+    particles[me.index].material = material_at_temperature(me, temperature);
+}
+
+fn tick_growth(me: Grain) {
+    if me.material.sprouts == NO_TRANSITION {
+        return;
+    }
+    let sprout = particles[me.index].sprout;
+    if (sprout & SHOOT_MASK) != 0u && !grown(sprout, me.material) {
+        particles[me.index].sprout = sprout + TICK;
+    }
+}
+
+@compute @workgroup_size(64)
+fn solve(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if global_id.x >= sorted_entry_count() {
+        return;
+    }
+    let me = grain_at(global_id.x);
+    if me.material.is_static > 0.5 {
+        particles[me.index].temperature = params.rest_temperature;
+        return;
+    }
+    let around = sense_surroundings(me);
+    end_contact_history(me.index, around.contacts_kept);
+    move_grain(me, around.force + weight_of(me) + stem_force_on(me) + air_drag_on(me, around.shelter));
+    particles[me.index].packing = around.packing;
+    heat_grain(me, around);
+    tick_growth(me);
+}
+
+const BEND_SCALE: f32 = 0.15;
+const UP: vec2<f32> = vec2<f32>(0.0, -1.0);
+const MAX_SHOOTS: u32 = 2u;
+const MAX_GRANDSHOOTS: u32 = MAX_SHOOTS * MAX_SHOOTS;
+
+struct Link {
+    position: vec2<f32>,
+    velocity: vec2<f32>,
+    radius: f32,
+    mass: f32,
+    bond_freq: f32,
+    zeta: f32,
+    rest_angle: f32,
+    index: u32,
+    parent: u32,
+    grandparent: u32,
+};
+
+fn link_at(entry_index: u32) -> Link {
+    let e = cell_entries[entry_index];
+    let index = e.packed & PACKED_INDEX_MASK;
+    let m = material_params(e.packed >> PACKED_MATERIAL_SHIFT);
+    let node = particles[index];
+    return Link(
+        e.position, e.velocity, e.radius, mass_of(m, e.radius),
+        m.bond_freq, m.zeta_n, node.rest_angle, index, node.parent, node.grandparent,
+    );
+}
+
+fn rotate(v: vec2<f32>, angle: f32) -> vec2<f32> {
+    let c = cos(angle);
+    let s = sin(angle);
+    return vec2<f32>(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+fn signed_angle(from_direction: vec2<f32>, to_direction: vec2<f32>) -> f32 {
+    return atan2(
+        from_direction.x * to_direction.y - from_direction.y * to_direction.x,
+        dot(from_direction, to_direction),
+    );
+}
+
+fn bond_between(me: Grain, them: Neighbour) -> vec2<f32> {
+    let m = spring(
+        sqrt(me.material.bond_freq * them.material.bond_freq), 0.0,
+        sqrt(me.material.zeta_n * them.material.zeta_n), 0.0,
+        0.5 * min(me.mass, them.mass), 0.0,
+    );
+    let normal = them.offset / them.distance;
+    let stretch = them.distance - (me.entry.radius + them.entry.radius);
+    let closing = dot(them.entry.velocity - me.entry.velocity, normal);
+    return (m.k_n * stretch + implicit_damping(m.gamma_n, m.mass) * closing) * normal;
+}
+
+fn contact_solve_applies(me: Grain, them: Neighbour) -> vec2<f32> {
+    if !touching(me, them) {
+        return vec2<f32>(0.0);
+    }
+    return contact_between(me, them).force;
+}
+
+struct Family {
+    parent: u32,
+    grandparent: u32,
+    shoots: array<u32, MAX_SHOOTS>,
+    shoot_count: u32,
+    grandshoots: array<u32, MAX_GRANDSHOOTS>,
+    grandshoot_count: u32,
+    bond_force: vec2<f32>,
+};
+
+fn add_shoot(family: ptr<function, Family>, entry: u32) {
+    if (*family).shoot_count < MAX_SHOOTS {
+        (*family).shoots[(*family).shoot_count] = entry;
+        (*family).shoot_count += 1u;
+    }
+}
+
+fn add_grandshoot(family: ptr<function, Family>, entry: u32) {
+    if (*family).grandshoot_count < MAX_GRANDSHOOTS {
+        (*family).grandshoots[(*family).grandshoot_count] = entry;
+        (*family).grandshoot_count += 1u;
+    }
+}
+
+fn meet_relative(me: Grain, myself: Link, entry: u32, family: ptr<function, Family>) {
+    let other = cell_entries[entry];
+    if !is_neighbour(me, other) {
+        return;
+    }
+    let them = neighbour_from(me, other);
+    if them.material.bond_freq <= 0.0 {
+        return;
+    }
+    let their_links = particles[them.index];
+    if myself.grandparent == them.index {
+        (*family).grandparent = entry;
+    }
+    if their_links.grandparent == me.index {
+        add_grandshoot(family, entry);
+    }
+    let is_parent = myself.parent == them.index;
+    let is_child = their_links.parent == me.index;
+    if is_parent {
+        (*family).parent = entry;
+    } else if is_child {
+        add_shoot(family, entry);
+    }
+    if is_parent || is_child {
+        (*family).bond_force += bond_between(me, them) - contact_solve_applies(me, them);
+    }
+}
+
+fn find_family(me: Grain, myself: Link) -> Family {
+    var family: Family;
+    family.parent = NO_ENTRY;
+    family.grandparent = NO_ENTRY;
+    let centre_cell = cell_of(me.entry.position);
+    for (var dy = -params.sweep; dy <= params.sweep; dy++) {
+        let row = entries_in_row(centre_cell, dy);
+        for (var entry = row.first; entry < row.end; entry++) {
+            meet_relative(me, myself, entry, &family);
         }
     }
+    return family;
+}
 
-    particles[index].position = position;
-    particles[index].velocity = velocity;
-    particles[index].material = material;
-    particles[index].drawn = drawn;
-    particles[index].packing = packed_next;
-    particles[index].temperature = temperature;
+fn bend_spring(parent: Link, child: Link) -> Mixed {
+    var m = spring(
+        BEND_SCALE * sqrt(parent.bond_freq * child.bond_freq),
+        0.0,
+        sqrt(parent.zeta * child.zeta),
+        0.0,
+        0.5 * min(parent.mass, child.mass),
+        0.0,
+    );
+    m.gamma_n = implicit_damping(m.gamma_n, m.mass);
+    return m;
+}
+
+fn joint_error(grandparent: Link, parent: Link, child: Link) -> vec2<f32> {
+    let s = (child.radius + parent.radius) / (parent.radius + grandparent.radius);
+    let d = (child.position - parent.position)
+        - s * rotate(parent.position - grandparent.position, child.rest_angle);
+    let dv = (child.velocity - parent.velocity)
+        - s * rotate(parent.velocity - grandparent.velocity, child.rest_angle);
+    let m = bend_spring(parent, child);
+    return m.k_n * d + m.gamma_n * dv;
+}
+
+fn joint_reaction(grandparent: Link, parent: Link, child: Link, error: vec2<f32>) -> vec2<f32> {
+    let s = (child.radius + parent.radius) / (parent.radius + grandparent.radius);
+    return s * rotate(error, -child.rest_angle);
+}
+
+fn root_error(seed: Link, child: Link) -> vec2<f32> {
+    let d = (child.position - seed.position)
+        - (child.radius + seed.radius) * rotate(UP, child.rest_angle);
+    let m = bend_spring(seed, child);
+    return m.k_n * d + m.gamma_n * (child.velocity - seed.velocity);
+}
+
+fn bend_as_child(myself: Link, family: ptr<function, Family>) -> vec2<f32> {
+    if (*family).parent == NO_ENTRY {
+        return vec2<f32>(0.0);
+    }
+    let parent = link_at((*family).parent);
+    if myself.grandparent == NO_PARENT {
+        return -root_error(parent, myself);
+    }
+    if (*family).grandparent == NO_ENTRY {
+        return vec2<f32>(0.0);
+    }
+    let grandparent = link_at((*family).grandparent);
+    if !within_smoothing_radius(parent.position, grandparent.position) {
+        return vec2<f32>(0.0);
+    }
+    return -joint_error(grandparent, parent, myself);
+}
+
+fn bend_shoot(myself: Link, family: ptr<function, Family>, shoot: Link) -> vec2<f32> {
+    if myself.parent == NO_PARENT {
+        return root_error(myself, shoot);
+    }
+    if (*family).parent == NO_ENTRY {
+        return vec2<f32>(0.0);
+    }
+    let parent = link_at((*family).parent);
+    if !within_smoothing_radius(shoot.position, parent.position) {
+        return vec2<f32>(0.0);
+    }
+    let error = joint_error(parent, myself, shoot);
+    return error + joint_reaction(parent, myself, shoot, error);
+}
+
+fn bend_as_parent(myself: Link, family: ptr<function, Family>) -> vec2<f32> {
+    var force = vec2<f32>(0.0);
+    for (var i = 0u; i < (*family).shoot_count; i++) {
+        force += bend_shoot(myself, family, link_at((*family).shoots[i]));
+    }
+    return force;
+}
+
+fn shoot_entry_with_index(family: ptr<function, Family>, index: u32) -> u32 {
+    for (var i = 0u; i < (*family).shoot_count; i++) {
+        let entry = (*family).shoots[i];
+        if (cell_entries[entry].packed & PACKED_INDEX_MASK) == index {
+            return entry;
+        }
+    }
+    return NO_ENTRY;
+}
+
+fn bend_grandshoot(myself: Link, family: ptr<function, Family>, grandshoot: Link) -> vec2<f32> {
+    let shoot_entry = shoot_entry_with_index(family, grandshoot.parent);
+    if shoot_entry == NO_ENTRY {
+        return vec2<f32>(0.0);
+    }
+    let shoot = link_at(shoot_entry);
+    if !within_smoothing_radius(shoot.position, grandshoot.position) {
+        return vec2<f32>(0.0);
+    }
+    let error = joint_error(myself, shoot, grandshoot);
+    return -joint_reaction(myself, shoot, grandshoot, error);
+}
+
+fn bend_as_grandparent(myself: Link, family: ptr<function, Family>) -> vec2<f32> {
+    var force = vec2<f32>(0.0);
+    for (var i = 0u; i < (*family).grandshoot_count; i++) {
+        force += bend_grandshoot(myself, family, link_at((*family).grandshoots[i]));
+    }
+    return force;
+}
+
+fn weight_carried_by_stem(me: Grain, family: ptr<function, Family>) -> vec2<f32> {
+    if (*family).parent == NO_ENTRY {
+        return vec2<f32>(0.0);
+    }
+    return -weight_of(me);
+}
+
+@compute @workgroup_size(64)
+fn plant_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if global_id.x >= sorted_entry_count() {
+        return;
+    }
+    let me = grain_at(global_id.x);
+    if me.material.bond_freq <= 0.0 || me.material.is_static > 0.5 {
+        return;
+    }
+    let myself = link_at(global_id.x);
+    var family = find_family(me, myself);
+    particles[me.index].stem_force = family.bond_force
+        + weight_carried_by_stem(me, &family)
+        + bend_as_child(myself, &family)
+        + bend_as_parent(myself, &family)
+        + bend_as_grandparent(myself, &family);
 }
 
 const SHOOT_MASK: u32 = 0xFFFFu;
 const SIDE_SHOOT: u32 = 0x8000u;
 const TICK: u32 = 0x10000u;
-
-fn grown(sprout: u32, m: MaterialParams) -> bool {
-    return f32(sprout >> 16u) * params.dt >= m.growth_period;
-}
-
 const BRANCH_CHANCE: f32 = 0.06;
 const BRANCH_ANGLE: f32 = 1.2;
 const MIN_BRANCH: u32 = 6u;
@@ -707,6 +919,10 @@ const WANDER: f32 = 0.3;
 const UPRIGHT: f32 = 0.35;
 const SETTLED_SPEED: f32 = 20.0;
 const FLUID_ROOM: f32 = 0.25;
+
+fn grown(sprout: u32, m: MaterialParams) -> bool {
+    return f32(sprout >> 16u) * params.dt >= m.growth_period;
+}
 
 fn hash(x: u32) -> u32 {
     var h = x * 747796405u + 2891336453u;
@@ -718,116 +934,150 @@ fn unit_random(seed: u32) -> f32 {
     return f32(hash(seed) >> 8u) / 16777216.0;
 }
 
-fn site_blocked(site: vec2<f32>, radius: f32, grower: u32) -> bool {
-    let base = cell_of(site);
-    for (var dy = -params.sweep; dy <= params.sweep; dy++) {
-        for (var dx = -params.sweep; dx <= params.sweep; dx++) {
-            let cell = base + vec2<i32>(dx, dy);
-            if any(cell < vec2<i32>(0)) || any(cell >= vec2<i32>(params.grid)) {
-                continue;
-            }
-            let c = u32(cell.x) + u32(cell.y) * params.grid.x;
-            for (var entry = cell_start[c]; entry < cell_start[c + 1u]; entry++) {
-                let other = cell_entries[entry];
-                if (other.packed & PACKED_INDEX_MASK) == grower {
-                    continue;
-                }
-                let theirs = materials[min(other.packed >> PACKED_MATERIAL_SHIFT, params.material_count - 1u)];
-                let room = select(1.0, FLUID_ROOM, theirs.pressure_k > 0.0);
-                if distance(site, other.position) < room * (radius + other.radius) {
-                    return true;
-                }
-            }
+fn entry_crowds_site(other: CellEntry, site: vec2<f32>, radius: f32, grower: u32) -> bool {
+    if (other.packed & PACKED_INDEX_MASK) == grower {
+        return false;
+    }
+    let fluid = material_params(other.packed >> PACKED_MATERIAL_SHIFT).pressure_k > 0.0;
+    let room = select(1.0, FLUID_ROOM, fluid);
+    return distance(site, other.position) < room * (radius + other.radius);
+}
+
+fn row_crowds_site(row: EntryRange, site: vec2<f32>, radius: f32, grower: u32) -> bool {
+    for (var entry = row.first; entry < row.end; entry++) {
+        if entry_crowds_site(cell_entries[entry], site, radius, grower) {
+            return true;
         }
     }
     return false;
 }
 
-@compute @workgroup_size(64)
-fn grow(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let index = global_id.x;
-    if index >= params.particle_count {
-        return;
-    }
-    let me = particles[index];
-    let shoot = me.sprout & SHOOT_MASK;
-    if me.material == DEAD || shoot == 0u {
-        return;
-    }
-    let mine = materials[min(me.material, params.material_count - 1u)];
-    if mine.sprouts == NO_TRANSITION || !grown(me.sprout, mine) {
-        return;
-    }
-
-    var stem = UP;
-    var rooted = false;
-    if me.parent != NO_PARENT {
-        let parent = particles[me.parent];
-        let theirs = materials[min(parent.material, params.material_count - 1u)];
-        let along = me.position - parent.position;
-        if parent.material != DEAD && theirs.bond_freq > 0.0 && length(along) > 1e-6 {
-            stem = normalize(along);
-            rooted = true;
+fn site_blocked(site: vec2<f32>, radius: f32, grower: u32) -> bool {
+    let centre_cell = cell_of(site);
+    for (var dy = -params.sweep; dy <= params.sweep; dy++) {
+        if row_crowds_site(entries_in_row(centre_cell, dy), site, radius, grower) {
+            return true;
         }
     }
-    if !rooted && length(me.velocity) > SETTLED_SPEED {
-        return;
-    }
-    particles[index].sprout = shoot;
+    return false;
+}
 
-    let seed = index ^ bitcast<u32>(me.position.x) ^ (bitcast<u32>(me.position.y) << 1u);
-    let side = (shoot & SIDE_SHOOT) != 0u;
+fn site_outside_world(site: vec2<f32>, radius: f32) -> bool {
+    return any(site < vec2<f32>(radius)) || any(site > params.world - radius);
+}
+
+fn ready_to_grow(me: Particle) -> bool {
+    if me.material == DEAD || (me.sprout & SHOOT_MASK) == 0u {
+        return false;
+    }
+    let mine = material_params(me.material);
+    return mine.sprouts != NO_TRANSITION && grown(me.sprout, mine);
+}
+
+struct Stem {
+    direction: vec2<f32>,
+    rooted: bool,
+};
+
+fn stem_of(me: Particle) -> Stem {
+    if me.parent == NO_PARENT {
+        return Stem(UP, false);
+    }
+    let parent = particles[me.parent];
+    let along = me.position - parent.position;
+    if parent.material == DEAD || material_params(parent.material).bond_freq <= 0.0
+        || length(along) <= 1e-6 {
+        return Stem(UP, false);
+    }
+    return Stem(normalize(along), true);
+}
+
+fn growth_direction(stem: vec2<f32>, shoot: u32, seed: u32) -> vec2<f32> {
+    if (shoot & SIDE_SHOOT) != 0u {
+        return rotate(stem, select(-BRANCH_ANGLE, BRANCH_ANGLE, unit_random(seed) < 0.5));
+    }
+    let wander = (unit_random(seed) * 2.0 - 1.0) * WANDER;
+    return normalize(rotate(stem, wander) + UPRIGHT * UP);
+}
+
+fn sprout_left_after_growing(shoot: u32, seed: u32) -> u32 {
     let length_left = shoot & ~SIDE_SHOOT;
-    var direction: vec2<f32>;
-    if side {
-        let turn = select(-BRANCH_ANGLE, BRANCH_ANGLE, unit_random(seed) < 0.5);
-        direction = rotate(stem, turn);
-    } else {
-        let wander = (unit_random(seed) * 2.0 - 1.0) * WANDER;
-        direction = normalize(rotate(stem, wander) + UPRIGHT * UP);
+    if (shoot & SIDE_SHOOT) != 0u || length_left <= MIN_BRANCH
+        || unit_random(seed + 2u) >= BRANCH_CHANCE {
+        return 0u;
     }
+    return SIDE_SHOOT | (length_left / 2u);
+}
 
-    let offshoot = materials[min(mine.sprouts, params.material_count - 1u)];
-    let radius = offshoot.radius * (0.9 + 0.2 * unit_random(seed + 1u));
-    let site = me.position + direction * (me.radius + radius);
-    if any(site < vec2<f32>(radius)) || any(site > params.world - radius)
-        || site_blocked(site, radius, index) {
-        return;
-    }
-
+fn claim_free_slot() -> u32 {
     let top = atomicSub(&allocator.free_count, 1u);
     if top == 0u || top > arrayLength(&allocator.free_stack) {
         atomicAdd(&allocator.free_count, 1u);
-        return;
+        return NO_SLOT;
     }
     let slot = allocator.free_stack[top - 1u];
     atomicMax(&allocator.high_water, slot + 1u);
+    return slot;
+}
 
-    let rest_angle = atan2(
-        stem.x * direction.y - stem.y * direction.x,
-        dot(stem, direction),
-    );
-    particles[slot] = Particle(
-        site,
+struct Offshoot {
+    site: vec2<f32>,
+    radius: f32,
+    rest_angle: f32,
+};
+
+fn offshoot_node(me: Particle, index: u32, offshoot: Offshoot) -> Particle {
+    return Particle(
+        offshoot.site,
         me.velocity,
-        radius,
-        mine.sprouts,
-        site,
+        offshoot.radius,
+        material_params(me.material).sprouts,
+        offshoot.site,
         0.0,
         me.temperature,
         index,
         me.parent,
-        length_left - 1u,
-        rest_angle,
+        (me.sprout & SHOOT_MASK & ~SIDE_SHOOT) - 1u,
+        offshoot.rest_angle,
         vec2<f32>(0.0),
     );
-    let empty = ContactRecord(NO_CONTACT, 0u, vec2<f32>(0.0));
-    contacts[(slot * 2u) * params.max_contacts] = empty;
-    contacts[(slot * 2u + 1u) * params.max_contacts] = empty;
+}
 
-    var keeps = 0u;
-    if !side && length_left > MIN_BRANCH && unit_random(seed + 2u) < BRANCH_CHANCE {
-        keeps = SIDE_SHOOT | (length_left / 2u);
+fn plan_offshoot(me: Particle, stem: vec2<f32>, seed: u32) -> Offshoot {
+    let direction = growth_direction(stem, me.sprout & SHOOT_MASK, seed);
+    let offshoot_material = material_params(material_params(me.material).sprouts);
+    let radius = offshoot_material.radius * (0.9 + 0.2 * unit_random(seed + 1u));
+    return Offshoot(
+        me.position + direction * (me.radius + radius),
+        radius,
+        signed_angle(stem, direction),
+    );
+}
+
+@compute @workgroup_size(64)
+fn grow(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let index = global_id.x;
+    if index >= params.particle_count || !ready_to_grow(particles[index]) {
+        return;
     }
-    particles[index].sprout = keeps;
+    let me = particles[index];
+    let stem = stem_of(me);
+    if !stem.rooted && length(me.velocity) > SETTLED_SPEED {
+        return;
+    }
+    let shoot = me.sprout & SHOOT_MASK;
+    particles[index].sprout = shoot;
+    let seed = index ^ bitcast<u32>(me.position.x) ^ (bitcast<u32>(me.position.y) << 1u);
+    let offshoot = plan_offshoot(me, stem.direction, seed);
+    if site_outside_world(offshoot.site, offshoot.radius)
+        || site_blocked(offshoot.site, offshoot.radius, index) {
+        return;
+    }
+    let slot = claim_free_slot();
+    if slot == NO_SLOT {
+        return;
+    }
+    particles[slot] = offshoot_node(me, index, offshoot);
+    clear_contact_history(slot);
+    particles[index].sprout = sprout_left_after_growing(shoot, seed);
 }

@@ -49,7 +49,7 @@ struct Params {
     gust_radius: f32,
     gust_outflow: f32,
     contact_parity: u32,
-    _padding: u32,
+    rest_temperature: f32,
 }
 
 unsafe impl bytemuck::Zeroable for Params {}
@@ -462,7 +462,7 @@ impl Solver {
             gust_radius: gust.radius,
             gust_outflow: gust.outflow,
             contact_parity,
-            _padding: 0,
+            rest_temperature: globals.rest_temperature,
         }
     }
 
@@ -668,31 +668,12 @@ impl Solver {
     }
 
     pub fn step(&mut self, gpu_context: &GpuContext<'_>, frame_dt: f32) {
-        let ceiling = config::SUBSTEP * config::MAX_SUBSTEPS as f32;
-        self.accumulator = (self.accumulator + frame_dt).min(ceiling);
-
-        let mut substeps = 0u32;
-        while self.accumulator >= config::SUBSTEP && substeps < config::MAX_SUBSTEPS {
-            self.accumulator -= config::SUBSTEP;
-            substeps += 1;
-        }
-        self.last_substeps = substeps;
-        if let Some(bound) = self.spawn.poll_readback(gpu_context) {
-            let bound = bound.min(config::MAX_PARTICLES);
-            if bound != self.slot_bound {
-                self.slot_bound = bound;
-                self.counts_stale = true;
-                self.write_params(gpu_context);
-            }
-        }
+        let substeps = self.take_due_substeps(frame_dt);
+        self.apply_slot_bound_readback(gpu_context);
         if let Some(timer) = &mut self.timer {
             timer.poll(gpu_context);
         }
-        let gust = std::mem::take(&mut self.next_gust);
-        if gust != self.gust {
-            self.gust = gust;
-            self.write_params(gpu_context);
-        }
+        self.apply_next_gust(gpu_context);
 
         let spawn_count = self
             .spawn
@@ -703,10 +684,6 @@ impl Solver {
         if substeps == 0 && spawn_count == 0 && !heating && !self.spawn.wants_readback() {
             return;
         }
-        if spawn_count > 0 {
-            self.slot_bound = (self.slot_bound + spawn_count as u32).min(config::MAX_PARTICLES);
-            self.write_params(gpu_context);
-        }
 
         let mut encoder =
             gpu_context
@@ -714,66 +691,10 @@ impl Solver {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("Solver Encoder"),
                 });
-        if spawn_count > 0 {
-            self.spawn
-                .record(gpu_context, &mut encoder, spawn_count, self.slot_bound);
-            self.counts_stale = true;
-        }
+        self.record_spawns(gpu_context, &mut encoder, spawn_count);
         self.spawn.record_heat(gpu_context, &mut encoder);
-        if substeps > 0 && self.counts_stale {
-            self.record_count(&mut encoder);
-        }
         let timing = self.timer.as_ref().is_some_and(PassTimer::is_idle);
-        if timing {
-            let timer = self.timer.as_mut().expect("timing implies a timer");
-            timer.begin_frame();
-            for _ in 0..substeps {
-                let offset = self.params_offset();
-                for span in Span::ALL {
-                    let pair = self.timer.as_mut().and_then(PassTimer::next_pair);
-                    let (pipeline, groups) = self.dispatch(span);
-                    let timer = self.timer.as_ref().expect("timing implies a timer");
-                    let writes = pair.map(|(begin, end)| wgpu::ComputePassTimestampWrites {
-                        query_set: timer.query_set(),
-                        beginning_of_pass_write_index: Some(begin),
-                        end_of_pass_write_index: Some(end),
-                    });
-                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some(span.label()),
-                        timestamp_writes: writes,
-                    });
-                    pass.set_bind_group(0, &self.bind_group, &[offset]);
-                    pass.set_pipeline(pipeline);
-                    if groups[0] > 0 {
-                        pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
-                    }
-                }
-                self.contact_parity ^= 1;
-            }
-            self.timer
-                .as_mut()
-                .expect("timing implies a timer")
-                .resolve(&mut encoder);
-        } else {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Solver Pass"),
-                timestamp_writes: None,
-            });
-            for _ in 0..substeps {
-                pass.set_bind_group(0, &self.bind_group, &[self.params_offset()]);
-                for span in Span::ALL {
-                    let (pipeline, groups) = self.dispatch(span);
-                    if groups[0] > 0 {
-                        pass.set_pipeline(pipeline);
-                        pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
-                    }
-                }
-                self.contact_parity ^= 1;
-            }
-        }
-        if substeps > 0 && self.growing {
-            self.record_grow(&mut encoder);
-        }
+        self.record_simulation(&mut encoder, substeps, timing);
 
         let reading = self.spawn.record_readback(&mut encoder);
         gpu_context.queue.submit(Some(encoder.finish()));
@@ -786,6 +707,130 @@ impl Solver {
                 .expect("timing implies a timer")
                 .begin_readback();
         }
+    }
+
+    fn take_due_substeps(&mut self, frame_dt: f32) -> u32 {
+        let ceiling = config::SUBSTEP * config::MAX_SUBSTEPS as f32;
+        self.accumulator = (self.accumulator + frame_dt).min(ceiling);
+
+        let mut substeps = 0u32;
+        while self.accumulator >= config::SUBSTEP && substeps < config::MAX_SUBSTEPS {
+            self.accumulator -= config::SUBSTEP;
+            substeps += 1;
+        }
+        self.last_substeps = substeps;
+        substeps
+    }
+
+    fn apply_slot_bound_readback(&mut self, gpu_context: &GpuContext<'_>) {
+        let Some(bound) = self.spawn.poll_readback(gpu_context) else {
+            return;
+        };
+        let bound = bound.min(config::MAX_PARTICLES);
+        if bound != self.slot_bound {
+            self.slot_bound = bound;
+            self.counts_stale = true;
+            self.write_params(gpu_context);
+        }
+    }
+
+    fn apply_next_gust(&mut self, gpu_context: &GpuContext<'_>) {
+        let gust = std::mem::take(&mut self.next_gust);
+        if gust != self.gust {
+            self.gust = gust;
+            self.write_params(gpu_context);
+        }
+    }
+
+    fn record_spawns(
+        &mut self,
+        gpu_context: &GpuContext<'_>,
+        encoder: &mut wgpu::CommandEncoder,
+        spawn_count: usize,
+    ) {
+        if spawn_count == 0 {
+            return;
+        }
+        self.slot_bound = (self.slot_bound + spawn_count as u32).min(config::MAX_PARTICLES);
+        self.write_params(gpu_context);
+        self.spawn
+            .record(gpu_context, encoder, spawn_count, self.slot_bound);
+        self.counts_stale = true;
+    }
+
+    fn record_simulation(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        substeps: u32,
+        timing: bool,
+    ) {
+        if substeps > 0 && self.counts_stale {
+            self.record_count(encoder);
+        }
+        if timing {
+            self.record_timed_substeps(encoder, substeps);
+        } else {
+            self.record_substeps(encoder, substeps);
+        }
+        if substeps > 0 && self.growing {
+            self.record_grow(encoder);
+        }
+    }
+
+    fn record_substeps(&mut self, encoder: &mut wgpu::CommandEncoder, substeps: u32) {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Solver Pass"),
+            timestamp_writes: None,
+        });
+        for _ in 0..substeps {
+            pass.set_bind_group(0, &self.bind_group, &[self.params_offset()]);
+            for span in Span::ALL {
+                self.record_span(&mut pass, span);
+            }
+            self.contact_parity ^= 1;
+        }
+    }
+
+    fn record_timed_substeps(&mut self, encoder: &mut wgpu::CommandEncoder, substeps: u32) {
+        self.timer
+            .as_mut()
+            .expect("timing implies a timer")
+            .begin_frame();
+        for _ in 0..substeps {
+            for span in Span::ALL {
+                self.record_timed_span(encoder, span);
+            }
+            self.contact_parity ^= 1;
+        }
+        self.timer
+            .as_mut()
+            .expect("timing implies a timer")
+            .resolve(encoder);
+    }
+
+    fn record_timed_span(&mut self, encoder: &mut wgpu::CommandEncoder, span: Span) {
+        let pair = self.timer.as_mut().and_then(PassTimer::next_pair);
+        let timer = self.timer.as_ref().expect("timing implies a timer");
+        let writes = pair.map(|(begin, end)| wgpu::ComputePassTimestampWrites {
+            query_set: timer.query_set(),
+            beginning_of_pass_write_index: Some(begin),
+            end_of_pass_write_index: Some(end),
+        });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(span.label()),
+            timestamp_writes: writes,
+        });
+        pass.set_bind_group(0, &self.bind_group, &[self.params_offset()]);
+        self.record_span(&mut pass, span);
+    }
+
+    fn record_span(&self, pass: &mut wgpu::ComputePass<'_>, span: Span) {
+        let (pipeline, groups) = self.dispatch(span);
+        if groups[0] == 0 {
+            return;
+        }
+        pass.set_pipeline(pipeline);
+        pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
     }
 }
 

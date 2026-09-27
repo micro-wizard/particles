@@ -258,9 +258,10 @@ impl<'a> Controller<'a> {
                     self.model.pass_timings(),
                 );
                 self.overlay.run(
-                    self.view.size.width,
-                    self.view.size.height,
-                    scale,
+                    &egui_wgpu::ScreenDescriptor {
+                        size_in_pixels: [self.view.size.width, self.view.size.height],
+                        pixels_per_point: scale,
+                    },
                     self.model.live_count(),
                     self.fullscreen_available
                         .then(|| self.view.window().fullscreen().is_some()),

@@ -210,44 +210,51 @@ fn sky(coord: vec2<i32>) -> vec3<f32> {
     return mix(BACKGROUND, AIR_TINT, AIR_OPACITY * shine);
 }
 
+struct LitNeighbours {
+    count: u32,
+    material_sum: f32,
+};
+
+fn lit_neighbours(coord: vec2<i32>, dims: vec2<i32>) -> LitNeighbours {
+    var lit = LitNeighbours(0u, 0.0);
+    for (var i = 0; i < 9; i++) {
+        if i == 4 {
+            continue;
+        }
+        let probe = clamp(coord + vec2<i32>(i % 3 - 1, i / 3 - 1), vec2<i32>(0), dims - vec2<i32>(1));
+        let neighbour = textureLoad(pixel_texture, probe, 0);
+        if neighbour.a > 0.5 {
+            lit.count += 1u;
+            lit.material_sum += neighbour.r;
+        }
+    }
+    return lit;
+}
+
+fn encoded_material_at(coord: vec2<i32>, dims: vec2<i32>) -> u32 {
+    let centre = textureLoad(pixel_texture, coord, 0);
+    if centre.a > 0.5 {
+        return u32(round(centre.r * 255.0));
+    }
+    let lit = lit_neighbours(coord, dims);
+    if lit.count < FILL_NEIGHBOURS {
+        return MATERIAL_NONE;
+    }
+    return u32(round(lit.material_sum / f32(lit.count) * 255.0));
+}
+
 @fragment
 fn blit_fs(in: BlitOutput) -> @location(0) vec4<f32> {
     let dims = vec2<i32>(textureDimensions(pixel_texture));
-    let dims_f = vec2<f32>(dims);
     let local = (in.clip_position.xy - placement.offset) / placement.scale;
-    if any(local < vec2<f32>(0.0)) || any(local >= dims_f) {
+    if any(local < vec2<f32>(0.0)) || any(local >= vec2<f32>(dims)) {
         return vec4<f32>(LETTERBOX, 1.0);
     }
     let coord = vec2<i32>(floor(local));
-    let centre = textureLoad(pixel_texture, coord, 0);
-    var lit = 0u;
-    var neighbour_material = 0.0;
-    for (var dy = -1; dy <= 1; dy++) {
-        for (var dx = -1; dx <= 1; dx++) {
-            if dx == 0 && dy == 0 {
-                continue;
-            }
-            let probe = clamp(coord + vec2<i32>(dx, dy), vec2<i32>(0), dims - vec2<i32>(1));
-            let neighbour = textureLoad(pixel_texture, probe, 0);
-            if neighbour.a > 0.5 {
-                lit += 1u;
-                neighbour_material += neighbour.r;
-            }
-        }
-    }
-
-    var encoded = u32(round(centre.r * 255.0));
-    if centre.a <= 0.5 {
-        if lit < FILL_NEIGHBOURS {
-            return vec4<f32>(sky(coord), 1.0);
-        }
-
-        encoded = u32(round(neighbour_material / f32(lit) * 255.0));
-    }
+    let encoded = encoded_material_at(coord, dims);
     if encoded == MATERIAL_NONE {
         return vec4<f32>(sky(coord), 1.0);
     }
-    let material = encoded - 1u;
     let tone = hash_pixel(coord / TEXTURE_BLOCK) % TONES;
-    return vec4<f32>(material_colour(material, tone), 1.0);
+    return vec4<f32>(material_colour(encoded - 1u, tone), 1.0);
 }

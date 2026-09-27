@@ -306,19 +306,16 @@ impl Overlay {
 
     pub fn run(
         &mut self,
-        width: u32,
-        height: u32,
-        scale: f32,
+        display: &egui_wgpu::ScreenDescriptor,
         particle_count: u32,
         fullscreen: Option<bool>,
         world: [f32; 4],
         blow_direction: [f32; 2],
     ) {
+        let scale = display.pixels_per_point;
+        let screen = size_in_points(display);
         let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(width as f32 / scale, height as f32 / scale),
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), screen)),
             modifiers: self.modifiers,
             events: std::mem::take(&mut self.events),
             ..Default::default()
@@ -330,7 +327,6 @@ impl Overlay {
             self.stats.substeps,
             self.stats.sim_speed(),
         );
-        let screen = egui::vec2(width as f32 / scale, height as f32 / scale);
 
         let panel = egui::Rect::from_min_max(
             egui::pos2(0.0, (world[1] + world[3]) / scale),
@@ -347,7 +343,13 @@ impl Overlay {
         let show_developer = self.show_developer;
 
         let output = self.context.run(raw, |ctx| {
-            if menu(ctx, panel, scale, brush, &colours, fullscreen) {
+            let state = MenuState {
+                brush: &mut *brush,
+                colours: &colours,
+                fullscreen,
+                world: &mut *globals,
+            };
+            if menu(ctx, panel, scale, state) {
                 *fullscreen_requested = true;
             }
 
@@ -425,6 +427,14 @@ impl Overlay {
                     ui.add(
                         egui::Slider::new(&mut globals.air_drag, 0.0..=0.05)
                             .text("air drag"),
+                    );
+                    ui.add(
+                        egui::Slider::new(
+                            &mut globals.rest_temperature,
+                            config::MIN_TEMPERATURE..=config::MAX_TEMPERATURE,
+                        )
+                        .text("resting temperature")
+                        .suffix(" °"),
                     );
                     ui.small(
                         "The air's speed (positive blows right) and how hard it drags on \
@@ -530,9 +540,7 @@ impl Overlay {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        width: u32,
-        height: u32,
-        scale: f32,
+        display: &egui_wgpu::ScreenDescriptor,
     ) {
         if self.paint_jobs.is_empty() {
             return;
@@ -541,12 +549,8 @@ impl Overlay {
         for (id, image) in &delta.set {
             self.renderer.update_texture(device, queue, *id, image);
         }
-        let desc = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [width, height],
-            pixels_per_point: scale,
-        };
         self.renderer
-            .update_buffers(device, queue, encoder, &self.paint_jobs, &desc);
+            .update_buffers(device, queue, encoder, &self.paint_jobs, display);
 
         let mut pass = encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -564,7 +568,7 @@ impl Overlay {
                 timestamp_writes: None,
             })
             .forget_lifetime();
-        self.renderer.render(&mut pass, &self.paint_jobs, &desc);
+        self.renderer.render(&mut pass, &self.paint_jobs, display);
         drop(pass);
 
         for id in &delta.free {
@@ -587,7 +591,6 @@ const NAME_GAP: i32 = 4;
 
 const CHIP: i32 = pixel_font::HEIGHT;
 const SLIDER_WIDTH: i32 = 64;
-const SLIDER_LABELS: [&str; 3] = ["Size", "Rate", "Force"];
 const HANDLE_WIDTH: i32 = 3;
 
 const fn hex(rgb: u32) -> egui::Color32 {
@@ -605,6 +608,82 @@ const PAINT_ACCENT: egui::Color32 = hex(0xfabd2f);
 const HEAT_ACCENT: egui::Color32 = hex(0xfe8019);
 const COOL_ACCENT: egui::Color32 = hex(0x83a598);
 const AIR_ACCENT: egui::Color32 = hex(0x8ec07c);
+
+struct MenuSlider {
+    label: &'static str,
+    low: f32,
+    high: f32,
+    tip: &'static str,
+}
+
+impl MenuSlider {
+    fn width(&self) -> i32 {
+        pixel_font::width(self.label) + NAME_GAP + SLIDER_WIDTH
+    }
+
+    fn offset_of(&self, value: f32) -> i32 {
+        let travel = SLIDER_WIDTH - HANDLE_WIDTH;
+        (((value - self.low) / (self.high - self.low)).clamp(0.0, 1.0) * travel as f32).round()
+            as i32
+    }
+}
+
+const BRUSH_SIZE: MenuSlider = MenuSlider {
+    label: "Size",
+    low: 0.0,
+    high: config::BRUSH_RADIUS_LIMIT,
+    tip: "How far the brush reaches: the red circle around the cursor.",
+};
+
+const BRUSH_RATE: MenuSlider = MenuSlider {
+    label: "Rate",
+    low: 60.0,
+    high: 3600.0,
+    tip: "How fast Heat and Cool change the temperature, in degrees per second.",
+};
+
+const BRUSH_FORCE: MenuSlider = MenuSlider {
+    label: "Force",
+    low: 100.0,
+    high: 3000.0,
+    tip: "How hard Blow and Burst push: the speed of the air they make. Steam goes \
+          with the gentlest breeze, sand with about half, and gravel wants most of it.",
+};
+
+const BRUSH_SLIDERS: [MenuSlider; 3] = [BRUSH_SIZE, BRUSH_RATE, BRUSH_FORCE];
+
+const WORLD_SLIDERS: [(MenuSlider, egui::Color32); 3] = [
+    (
+        MenuSlider {
+            label: "Gravity",
+            low: 0.0,
+            high: 450.0,
+            tip: "How hard everything falls. At zero, grains drift where they are left.",
+        },
+        TEXT_HOVER,
+    ),
+    (
+        MenuSlider {
+            label: "Temp",
+            low: -40.0,
+            high: 300.0,
+            tip: "The temperature everything settles to: the walls hold it and the air \
+                  slowly brings every exposed grain to it. Water freezes below 0 and boils \
+                  above 100, and plants catch fire at 250.",
+        },
+        HEAT_ACCENT,
+    ),
+    (
+        MenuSlider {
+            label: "Wind",
+            low: -1000.0,
+            high: 1000.0,
+            tip: "A breeze across the whole world, blowing whichever way the slider leans \
+                  from centre. Light grains go first, and only surfaces feel it.",
+        },
+        AIR_ACCENT,
+    ),
+];
 
 const TOOLS: [(BrushMode, &str, egui::Color32, &str); 5] = [
     (
@@ -650,6 +729,8 @@ enum Piece {
     Swatch(usize),
 
     Controls,
+
+    World,
 }
 
 impl Piece {
@@ -666,6 +747,13 @@ impl Piece {
             Piece::Controls => {
                 slider_label_width() + NAME_GAP + SLIDER_WIDTH + ITEM_GAP + FULLSCREEN.width
             }
+            Piece::World => {
+                WORLD_SLIDERS
+                    .iter()
+                    .map(|(slider, _)| slider.width())
+                    .sum::<i32>()
+                    + (WORLD_SLIDERS.len() as i32 - 1) * ITEM_GAP
+            }
         }
     }
 
@@ -674,6 +762,7 @@ impl Piece {
             Piece::Tools => 0,
             Piece::Swatch(_) => 1,
             Piece::Controls => 2,
+            Piece::World => 3,
         };
         if group(self) == group(previous) {
             ITEM_GAP
@@ -690,7 +779,7 @@ fn menu_rows(width: i32) -> Vec<Vec<Piece>> {
                 .filter(|&id| MATERIALS[id].palette)
                 .map(Piece::Swatch),
         )
-        .chain(std::iter::once(Piece::Controls));
+        .chain([Piece::Controls, Piece::World]);
     let mut rows: Vec<Vec<Piece>> = Vec::new();
     for piece in pieces {
         match rows.last_mut() {
@@ -715,9 +804,9 @@ fn row_width(row: &[Piece]) -> i32 {
 }
 
 fn slider_label_width() -> i32 {
-    SLIDER_LABELS
+    BRUSH_SLIDERS
         .iter()
-        .map(|label| pixel_font::width(label))
+        .map(|slider| pixel_font::width(slider.label))
         .max()
         .unwrap_or(0)
 }
@@ -730,56 +819,89 @@ pub fn zoom_for(width: f32) -> f32 {
     (width / MENU_FULL_SIZE_WIDTH).clamp(MENU_MIN_ZOOM, 1.0)
 }
 
+fn size_in_points(display: &egui_wgpu::ScreenDescriptor) -> egui::Vec2 {
+    let [width, height] = display.size_in_pixels;
+    egui::vec2(width as f32, height as f32) / display.pixels_per_point
+}
+
 fn menu_height_for(width: f32, pixel: f32) -> f32 {
     let rows = menu_rows((width / pixel).floor() as i32 - 2 * MENU_PAD).len() as i32;
     (2 * MENU_PAD + rows * ROW_HEIGHT + (rows - 1) * ROW_GAP) as f32 * pixel
 }
 
-fn menu(
-    ctx: &egui::Context,
-    panel: egui::Rect,
-    scale: f32,
-    brush: &mut Brush,
-    colours: &[[f32; 4]],
+struct MenuState<'a> {
+    brush: &'a mut Brush,
+    colours: &'a [[f32; 4]],
     fullscreen: Option<bool>,
-) -> bool {
-    let mut toggled = false;
+    world: &'a mut Globals,
+}
+
+fn menu(ctx: &egui::Context, panel: egui::Rect, scale: f32, mut state: MenuState<'_>) -> bool {
     egui::Area::new(egui::Id::new("menu"))
         .fixed_pos(panel.min)
         .constrain(false)
         .order(egui::Order::Foreground)
-        .show(ctx, |ui| {
-            ui.allocate_rect(panel, egui::Sense::hover());
-            let grid = pixel_font::Grid::new(panel.min, MENU_PIXEL, scale);
-            let [columns, height] = grid.cell(panel.max);
-            ui.painter().rect_filled(panel, 0.0, MENU_FILL);
-            grid.fill(ui.painter(), 0, 0, columns + 1, 1, MENU_EDGE);
+        .show(ctx, |ui| menu_contents(ui, panel, scale, &mut state))
+        .inner
+}
 
-            let rows = menu_rows(columns - 2 * MENU_PAD);
-            let rows_height = rows.len() as i32 * (ROW_HEIGHT + ROW_GAP) - ROW_GAP;
+fn menu_contents(
+    ui: &mut egui::Ui,
+    panel: egui::Rect,
+    scale: f32,
+    state: &mut MenuState<'_>,
+) -> bool {
+    ui.allocate_rect(panel, egui::Sense::hover());
+    let grid = pixel_font::Grid::new(panel.min, MENU_PIXEL, scale);
+    let [columns, height] = grid.cell(panel.max);
+    ui.painter().rect_filled(panel, 0.0, MENU_FILL);
+    grid.fill(ui.painter(), 0, 0, columns + 1, 1, MENU_EDGE);
 
-            let mut top = ((height - rows_height) / 2).max(MENU_PAD);
-            for row in &rows {
-                let mut left = (columns - row_width(row)) / 2;
-                let mut previous = None;
-                for &piece in row {
-                    if let Some(previous) = previous {
-                        left += piece.gap_after(previous);
-                    }
-                    match piece {
-                        Piece::Tools => tools(ui, grid, left, top, brush),
-                        Piece::Swatch(id) => swatch(ui, grid, left, top, brush, id, colours[id]),
-                        Piece::Controls => {
-                            toggled |= controls(ui, grid, left, top, brush, fullscreen)
-                        }
-                    }
-                    left += piece.width();
-                    previous = Some(piece);
-                }
-                top += ROW_HEIGHT + ROW_GAP;
-            }
-        });
+    let rows = menu_rows(columns - 2 * MENU_PAD);
+    let rows_height = rows.len() as i32 * (ROW_HEIGHT + ROW_GAP) - ROW_GAP;
+    let mut top = ((height - rows_height) / 2).max(MENU_PAD);
+    let mut toggled = false;
+    for row in &rows {
+        toggled |= menu_row(ui, grid, row, [(columns - row_width(row)) / 2, top], state);
+        top += ROW_HEIGHT + ROW_GAP;
+    }
     toggled
+}
+
+fn menu_row(
+    ui: &mut egui::Ui,
+    grid: pixel_font::Grid,
+    row: &[Piece],
+    at: [i32; 2],
+    state: &mut MenuState<'_>,
+) -> bool {
+    let [mut left, top] = at;
+    let mut toggled = false;
+    for (i, &piece) in row.iter().enumerate() {
+        if i > 0 {
+            left += piece.gap_after(row[i - 1]);
+        }
+        toggled |= menu_piece(ui, grid, piece, [left, top], state);
+        left += piece.width();
+    }
+    toggled
+}
+
+fn menu_piece(
+    ui: &mut egui::Ui,
+    grid: pixel_font::Grid,
+    piece: Piece,
+    at: [i32; 2],
+    state: &mut MenuState<'_>,
+) -> bool {
+    let [x, y] = at;
+    match piece {
+        Piece::Tools => tools(ui, grid, x, y, state.brush),
+        Piece::Swatch(id) => swatch(ui, grid, x, y, state.brush, id, state.colours[id]),
+        Piece::Controls => return controls(ui, grid, x, y, state.brush, state.fullscreen),
+        Piece::World => world_controls(ui, grid, x, y, state.world),
+    }
+    false
 }
 
 fn menu_item(
@@ -876,9 +998,8 @@ fn swatch(
         response = response.on_hover_text("Never moves: painting it lays down terrain.");
     }
     if material.params.sprouts != NO_TRANSITION {
-        response = response.on_hover_text(
-            "Sprouts once it lands and grows into a swaying plant that burns.",
-        );
+        response = response
+            .on_hover_text("Sprouts once it lands and grows into a swaying plant that burns.");
     }
     if response.clicked() {
         brush.material = id;
@@ -895,68 +1016,78 @@ fn controls(
     fullscreen: Option<bool>,
 ) -> bool {
     let accent = accent(brush.mode);
-
-    let (first, second) = (y, y + ROW_HEIGHT - pixel_font::HEIGHT);
+    let label_width = slider_label_width();
+    let place = |y| SliderPlace { x, y, label_width };
     menu_slider(
         ui,
         grid,
-        x,
-        first,
-        "Size",
+        place(y),
+        &BRUSH_SIZE,
         &mut brush.radius,
-        0.0..=config::BRUSH_RADIUS_LIMIT,
         Some(accent),
-        "How far the brush reaches: the red circle around the cursor.",
     );
+
     let enabled = brush.mode != BrushMode::Paint;
-    let (label, value, range, tip) = match brush.mode {
-        BrushMode::Blow | BrushMode::Burst => (
-            "Force",
-            &mut brush.wind_speed,
-            100.0..=3000.0,
-            "How hard Blow and Burst push: the speed of the air they make. Steam goes \
-             with the gentlest breeze, sand with about half, and gravel wants most of it.",
-        ),
-        BrushMode::Paint | BrushMode::Heat | BrushMode::Cool => (
-            "Rate",
-            &mut brush.heat_rate,
-            60.0..=3600.0,
-            "How fast Heat and Cool change the temperature, in degrees per second.",
-        ),
+    let (slider, value) = match brush.mode {
+        BrushMode::Blow | BrushMode::Burst => (&BRUSH_FORCE, &mut brush.wind_speed),
+        BrushMode::Paint | BrushMode::Heat | BrushMode::Cool => (&BRUSH_RATE, &mut brush.heat_rate),
     };
-    menu_slider(
-        ui,
-        grid,
-        x,
-        second,
-        label,
-        value,
-        range,
-        enabled.then_some(accent),
-        tip,
-    );
-    let icon = x + slider_label_width() + NAME_GAP + SLIDER_WIDTH + ITEM_GAP;
+    let second = place(y + ROW_HEIGHT - pixel_font::HEIGHT);
+    menu_slider(ui, grid, second, slider, value, enabled.then_some(accent));
+
+    let icon = x + label_width + NAME_GAP + SLIDER_WIDTH + ITEM_GAP;
     fullscreen.is_some_and(|fullscreen| fullscreen_toggle(ui, grid, icon, y, fullscreen))
 }
 
-#[allow(clippy::too_many_arguments)]
+fn world_controls(ui: &mut egui::Ui, grid: pixel_font::Grid, x: i32, y: i32, world: &mut Globals) {
+    let values = [
+        &mut world.gravity,
+        &mut world.rest_temperature,
+        &mut world.wind,
+    ];
+    let mut left = x;
+    for ((slider, accent), value) in WORLD_SLIDERS.iter().zip(values) {
+        let label_width = pixel_font::width(slider.label);
+        let place = SliderPlace {
+            x: left,
+            y: y + TEXT_TOP,
+            label_width,
+        };
+        menu_slider(ui, grid, place, slider, value, Some(*accent));
+        left += slider.width() + ITEM_GAP;
+    }
+}
+
+#[derive(Copy, Clone)]
+struct SliderPlace {
+    x: i32,
+    y: i32,
+    label_width: i32,
+}
+
+impl SliderPlace {
+    fn rail(self) -> i32 {
+        self.x + self.label_width + NAME_GAP
+    }
+}
+
+struct SliderLook {
+    text: egui::Color32,
+    fill: egui::Color32,
+    knob: egui::Color32,
+}
+
 fn menu_slider(
     ui: &mut egui::Ui,
     grid: pixel_font::Grid,
-    x: i32,
-    y: i32,
-    label: &str,
+    place: SliderPlace,
+    slider: &MenuSlider,
     value: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
     accent: Option<egui::Color32>,
-    tip: &str,
 ) {
-    let (low, high) = (*range.start(), *range.end());
-    let rail = x + slider_label_width() + NAME_GAP;
-    let travel = SLIDER_WIDTH - HANDLE_WIDTH;
     let hit = grid.rect(
-        rail - NAME_GAP / 2,
-        y - 1,
+        place.rail() - NAME_GAP / 2,
+        place.y - 1,
         SLIDER_WIDTH + NAME_GAP,
         pixel_font::HEIGHT + 2,
     );
@@ -967,46 +1098,102 @@ fn menu_slider(
     };
     let response = ui.allocate_rect(hit, sense);
     if accent.is_some() {
-        if let Some(pointer) = response.interact_pointer_pos() {
-            let start = grid.rect(rail, y, HANDLE_WIDTH, 1).center().x;
-            let along = (pointer.x - start) / (travel as f32 * grid.rect(0, 0, 1, 1).width());
-            *value = low + (high - low) * along.clamp(0.0, 1.0);
-        }
-        if response.has_focus() {
-            let step = (high - low) / travel as f32;
-            ui.input(|input| {
-                if input.key_pressed(egui::Key::ArrowRight) {
-                    *value = (*value + step).min(high);
-                }
-                if input.key_pressed(egui::Key::ArrowLeft) {
-                    *value = (*value - step).max(low);
-                }
-            });
-        }
+        drag_slider(&response, grid, place, slider, value);
+        nudge_slider(ui, &response, slider, value);
     }
-    response.widget_info(|| egui::WidgetInfo::slider(accent.is_some(), *value as f64, label));
+    response
+        .widget_info(|| egui::WidgetInfo::slider(accent.is_some(), *value as f64, slider.label));
+    paint_slider(
+        ui.painter(),
+        grid,
+        place,
+        slider,
+        *value,
+        slider_look(accent, &response),
+    );
+    response.on_hover_text(slider.tip);
+}
 
-    let painter = ui.painter();
-    let handle = (((*value - low) / (high - low)).clamp(0.0, 1.0) * travel as f32).round() as i32;
-    let (text, fill, knob) = match accent {
-        Some(accent) => {
-            let active = response.hovered() || response.dragged();
-            (TEXT, accent, if active { TEXT_CHOSEN } else { TEXT_HOVER })
-        }
-        None => (TEXT_DIM, TEXT_DIM, TEXT_DIM),
+fn drag_slider(
+    response: &egui::Response,
+    grid: pixel_font::Grid,
+    place: SliderPlace,
+    slider: &MenuSlider,
+    value: &mut f32,
+) {
+    let Some(pointer) = response.interact_pointer_pos() else {
+        return;
     };
-    grid.text(painter, x, y, label, text);
-    grid.fill(painter, rail, y + 2, SLIDER_WIDTH, 3, RAIL);
-    grid.fill(painter, rail, y + 2, handle, 3, fill);
+    let travel = SLIDER_WIDTH - HANDLE_WIDTH;
+    let start = grid.rect(place.rail(), place.y, HANDLE_WIDTH, 1).center().x;
+    let along = (pointer.x - start) / (travel as f32 * grid.rect(0, 0, 1, 1).width());
+    *value = slider.low + (slider.high - slider.low) * along.clamp(0.0, 1.0);
+}
+
+fn nudge_slider(ui: &egui::Ui, response: &egui::Response, slider: &MenuSlider, value: &mut f32) {
+    if !response.has_focus() {
+        return;
+    }
+    let step = (slider.high - slider.low) / (SLIDER_WIDTH - HANDLE_WIDTH) as f32;
+    let (right, left) = ui.input(|input| {
+        (
+            input.key_pressed(egui::Key::ArrowRight),
+            input.key_pressed(egui::Key::ArrowLeft),
+        )
+    });
+    if right {
+        *value = (*value + step).min(slider.high);
+    }
+    if left {
+        *value = (*value - step).max(slider.low);
+    }
+}
+
+fn slider_look(accent: Option<egui::Color32>, response: &egui::Response) -> SliderLook {
+    let Some(accent) = accent else {
+        return SliderLook {
+            text: TEXT_DIM,
+            fill: TEXT_DIM,
+            knob: TEXT_DIM,
+        };
+    };
+    let active = response.hovered() || response.dragged();
+    SliderLook {
+        text: TEXT,
+        fill: accent,
+        knob: if active { TEXT_CHOSEN } else { TEXT_HOVER },
+    }
+}
+
+fn paint_slider(
+    painter: &egui::Painter,
+    grid: pixel_font::Grid,
+    place: SliderPlace,
+    slider: &MenuSlider,
+    value: f32,
+    look: SliderLook,
+) {
+    let rail = place.rail();
+    let handle = slider.offset_of(value);
+    let zero = slider.offset_of(0.0);
+    grid.text(painter, place.x, place.y, slider.label, look.text);
+    grid.fill(painter, rail, place.y + 2, SLIDER_WIDTH, 3, RAIL);
+    grid.fill(
+        painter,
+        rail + zero.min(handle),
+        place.y + 2,
+        (handle - zero).abs(),
+        3,
+        look.fill,
+    );
     grid.fill(
         painter,
         rail + handle,
-        y,
+        place.y,
         HANDLE_WIDTH,
         pixel_font::HEIGHT,
-        knob,
+        look.knob,
     );
-    response.on_hover_text(tip);
 }
 
 fn brush_outline(
@@ -1224,17 +1411,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_menu_fits_in_two_rows_from_full_size() {
+    fn the_menu_fits_in_three_rows_from_full_size() {
         let largest = [1.0, 1.25, 1.5, 2.0, 3.0]
             .map(|scale| pixel_font::pixel_size(MENU_PIXEL, scale))
             .into_iter()
             .fold(0.0, f32::max);
         let height = menu_height_for(MENU_FULL_SIZE_WIDTH, largest);
-        let two_rows = (2 * MENU_PAD + 2 * ROW_HEIGHT + ROW_GAP) as f32 * largest;
-        assert!(height <= two_rows, "{height} > {two_rows}");
+        let three_rows = (2 * MENU_PAD + 3 * ROW_HEIGHT + 2 * ROW_GAP) as f32 * largest;
+        assert!(height <= three_rows, "{height} > {three_rows}");
 
         let narrowest = MENU_FULL_SIZE_WIDTH * MENU_MIN_ZOOM;
         assert_eq!(narrowest / zoom_for(narrowest), MENU_FULL_SIZE_WIDTH);
+    }
+
+    #[test]
+    fn world_sliders_reach_the_default_world() {
+        let world = Globals::default();
+        let defaults = [world.gravity, world.rest_temperature, world.wind];
+        for ((slider, _), value) in WORLD_SLIDERS.iter().zip(defaults) {
+            assert!(
+                (slider.low..=slider.high).contains(&value),
+                "{} cannot show its default of {value}",
+                slider.label,
+            );
+        }
     }
 
     #[test]
@@ -1243,7 +1443,8 @@ mod tests {
             .iter()
             .map(|tool| tool.1)
             .chain(MATERIALS.iter().map(|material| material.name))
-            .chain(SLIDER_LABELS);
+            .chain(BRUSH_SLIDERS.iter().map(|slider| slider.label))
+            .chain(WORLD_SLIDERS.iter().map(|(slider, _)| slider.label));
         for label in labels {
             assert!(label.chars().all(pixel_font::has_glyph), "{label}");
         }

@@ -514,6 +514,8 @@ pub struct Globals {
     pub wind: f32,
 
     pub air_drag: f32,
+
+    pub rest_temperature: f32,
 }
 
 impl Default for Globals {
@@ -527,6 +529,8 @@ impl Default for Globals {
             wind: 0.0,
 
             air_drag: 0.01,
+
+            rest_temperature: config::AMBIENT_TEMPERATURE,
         }
     }
 }
