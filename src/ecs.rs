@@ -47,8 +47,7 @@ impl Particle {
 }
 
 pub fn seed_world(grains: u32) -> Vec<Particle> {
-    let mut particles = seed_walls();
-    particles.extend(seed_block(grains));
+    let particles = seed_walls();
     particles
 }
 
