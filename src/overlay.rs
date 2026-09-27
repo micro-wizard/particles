@@ -310,7 +310,7 @@ impl Overlay {
         height: u32,
         scale: f32,
         particle_count: u32,
-        fullscreen: bool,
+        fullscreen: Option<bool>,
         world: [f32; 4],
         blow_direction: [f32; 2],
     ) {
@@ -737,7 +737,7 @@ fn menu(
     scale: f32,
     brush: &mut Brush,
     colours: &[[f32; 4]],
-    fullscreen: bool,
+    fullscreen: Option<bool>,
 ) -> bool {
     let mut toggled = false;
     egui::Area::new(egui::Id::new("menu"))
@@ -883,7 +883,7 @@ fn controls(
     x: i32,
     y: i32,
     brush: &mut Brush,
-    fullscreen: bool,
+    fullscreen: Option<bool>,
 ) -> bool {
     let accent = accent(brush.mode);
 
@@ -927,7 +927,7 @@ fn controls(
         tip,
     );
     let icon = x + slider_label_width() + NAME_GAP + SLIDER_WIDTH + ITEM_GAP;
-    fullscreen_toggle(ui, grid, icon, y, fullscreen)
+    fullscreen.is_some_and(|fullscreen| fullscreen_toggle(ui, grid, icon, y, fullscreen))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -103,6 +103,7 @@ pub struct Controller<'a> {
     is_left_mouse_button_pressed: bool,
     touch: Finger,
     aim: Aim,
+    fullscreen_available: bool,
 }
 
 impl<'a> Controller<'a> {
@@ -129,6 +130,7 @@ impl<'a> Controller<'a> {
             is_left_mouse_button_pressed: false,
             touch: Finger::default(),
             aim: Aim::new(),
+            fullscreen_available: fullscreen_available(),
         }
     }
 
@@ -260,7 +262,8 @@ impl<'a> Controller<'a> {
                     self.view.size.height,
                     scale,
                     self.model.live_count(),
-                    self.view.window().fullscreen().is_some(),
+                    self.fullscreen_available
+                        .then(|| self.view.window().fullscreen().is_some()),
                     self.view.world_rect(),
                     self.aim.direction,
                 );
@@ -321,6 +324,35 @@ impl<'a> Controller<'a> {
             None => Some(Fullscreen::Borderless(None)),
         });
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn fullscreen_available() -> bool {
+    use wasm_bindgen::{prelude::wasm_bindgen, JsCast};
+
+    #[wasm_bindgen]
+    extern "C" {
+        type FullscreenDocument;
+
+        #[wasm_bindgen(method, getter, js_name = fullscreenEnabled)]
+        fn fullscreen_enabled(this: &FullscreenDocument) -> Option<bool>;
+
+        #[wasm_bindgen(method, getter, js_name = webkitFullscreenEnabled)]
+        fn webkit_fullscreen_enabled(this: &FullscreenDocument) -> Option<bool>;
+    }
+
+    web_sys::window()
+        .and_then(|window| window.document())
+        .is_some_and(|document| {
+            let document: &FullscreenDocument = document.unchecked_ref();
+            document.fullscreen_enabled().unwrap_or(false)
+                || document.webkit_fullscreen_enabled().unwrap_or(false)
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fullscreen_available() -> bool {
+    true
 }
 
 pub async fn run() {
